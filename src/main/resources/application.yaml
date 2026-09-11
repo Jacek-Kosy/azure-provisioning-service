@@ -1,3 +1,32 @@
 spring:
   application:
     name: azure-provisioning-service
+  data:
+    mongodb:
+      uri: ${MONGODB_URI:mongodb://localhost:27017/azure-provisioning}
+      # Indexes are created explicitly by MongoIndexConfig, not derived from annotations.
+      auto-index-creation: false
+
+provisioning:
+  # How long a replica's claim on a job stays valid without renewal.
+  lease-duration: PT5M
+  # How often jobs abandoned by a dead replica are looked for.
+  sweep-interval: PT1M
+  sweep-batch-size: 100
+  # owner-id: derived from HOSTNAME (the pod name, in Kubernetes) when left unset.
+
+azure:
+  # Non-secret routing data only. Credentials come from the environment or a managed identity;
+  # see AzureCredentialConfig. Never put a client secret here.
+  tenant-id: ${AZURE_TENANT_ID:}
+  billing-scope: ${AZURE_BILLING_SCOPE:}
+  root-management-group: ${AZURE_ROOT_MANAGEMENT_GROUP:}
+
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+
+logging:
+  pattern:
+    # Carries the correlation id onto every line, request thread and worker thread alike.
+    level: "%5p [jobId=%X{jobId:-none}, accountId=%X{accountId:-none}]"
