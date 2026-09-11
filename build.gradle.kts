@@ -64,3 +64,11 @@ dependencyManagement {
 tasks.withType<Test> {
     useJUnitPlatform()
 }
+
+tasks.withType<Test> {
+    val socket = File(System.getProperty("user.home"), ".colima/default/docker.sock")
+    if (socket.exists()) {
+        environment("DOCKER_HOST", "unix://${socket.absolutePath}")
+        environment("TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE", "/var/run/docker.sock")
+    }
+}
