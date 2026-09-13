@@ -21,11 +21,14 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.Map;
 import java.util.Optional;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
@@ -57,7 +60,7 @@ class ProvisioningWorkflowTest {
         workflow = new AsyncProvisioningWorkflow(accounts, subscriptions, managementGroups,
                 Clock.fixed(NOW, ZoneOffset.UTC), properties);
         when(accounts.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
-        when(subscriptions.createSubscription(any())).thenReturn("sub-new");
+        when(subscriptions.createSubscription(any(), any())).thenReturn("sub-new");
     }
 
     private Account pending() {
@@ -80,6 +83,82 @@ class ProvisioningWorkflowTest {
         return account;
     }
 
+    /** A run that reached Azure but died before it could record what Azure gave it. */
+    private Account claimedRetryWithUntrackedOrphan() {
+        Account account = Account.newRequest("acc-1", "team-alpha-prod", "mg-workloads", LABELS,
+                new JobLease("job-1", "replica-a", NOW.plusSeconds(300)), NOW);
+        account.startProvisioning(NOW);
+        account.failStep("worker died", NOW);
+        account.startCleanup(new JobLease("job-2", "replica-a", NOW.plusSeconds(300)), NOW);
+        when(accounts.findById("acc-1")).thenReturn(Optional.of(account));
+        return account;
+    }
+
+    @Test
+    void createsTheSubscriptionUnderTheAttemptsOwnAlias() {
+        pending();
+
+        workflow.runFresh("acc-1");
+
+        verify(subscriptions).createSubscription("acct-acc-1-1", "team-alpha-prod");
+    }
+
+    @Test
+    void persistsTheAttemptBeforeAskingAzureToCreateAnything() {
+        pending();
+        List<Integer> persistedAttempts = new ArrayList<>();
+        AtomicReference<Integer> durableAtCreateTime = new AtomicReference<>();
+        when(accounts.save(any())).thenAnswer(invocation -> {
+            persistedAttempts.add(((Account) invocation.getArgument(0)).getAttempt());
+            return invocation.getArgument(0);
+        });
+        when(subscriptions.createSubscription(any(), any())).thenAnswer(invocation -> {
+            durableAtCreateTime.set(persistedAttempts.isEmpty() ? null
+                    : persistedAttempts.get(persistedAttempts.size() - 1));
+            return "sub-new";
+        });
+
+        workflow.runFresh("acc-1");
+
+        assertThat(durableAtCreateTime.get())
+                .as("the attempt must already be durable, or a crash here leaks the subscription")
+                .isEqualTo(1);
+    }
+
+    @Test
+    void deletesASubscriptionThePreviousAttemptCreatedButNeverRecorded() {
+        Account account = claimedRetryWithUntrackedOrphan();
+        when(subscriptions.findSubscriptionIdByAlias("acct-acc-1-1"))
+                .thenReturn(Optional.of("sub-untracked"));
+
+        workflow.runRetry("acc-1");
+
+        verify(subscriptions).deleteSubscription("sub-untracked");
+        verify(subscriptions).createSubscription("acct-acc-1-2", "team-alpha-prod");
+        assertThat(account.getStatus()).isEqualTo(ProvisioningStatus.COMPLETED);
+    }
+
+    @Test
+    void deletesNothingWhenThePreviousAttemptNeverReachedAzure() {
+        Account account = claimedRetryWithUntrackedOrphan();
+        when(subscriptions.findSubscriptionIdByAlias(any())).thenReturn(Optional.empty());
+
+        workflow.runRetry("acc-1");
+
+        verify(subscriptions, never()).deleteSubscription(any());
+        assertThat(account.getStatus()).isEqualTo(ProvisioningStatus.COMPLETED);
+    }
+
+    @Test
+    void trustsTheRecordedSubscriptionIdRatherThanLookingUpTheAlias() {
+        claimedRetryWithOrphan();
+
+        workflow.runRetry("acc-1");
+
+        verify(subscriptions).deleteSubscription("sub-orphan");
+        verify(subscriptions, never()).findSubscriptionIdByAlias(any());
+    }
+
     @Test
     void freshRunWalksEveryStepAndCompletes() {
         Account account = pending();
@@ -87,7 +166,7 @@ class ProvisioningWorkflowTest {
         workflow.runFresh("acc-1");
 
         InOrder order = inOrder(subscriptions, managementGroups);
-        order.verify(subscriptions).createSubscription("team-alpha-prod");
+        order.verify(subscriptions).createSubscription(any(), eq("team-alpha-prod"));
         order.verify(managementGroups).assignSubscription("sub-new", "mg-workloads");
         order.verify(subscriptions).applyTags("sub-new", LABELS);
 
@@ -102,7 +181,7 @@ class ProvisioningWorkflowTest {
         AtomicReference<ProvisioningStatus> statusDuringCreate = new AtomicReference<>();
         AtomicReference<ProvisioningStatus> statusDuringAssign = new AtomicReference<>();
         AtomicReference<ProvisioningStatus> statusDuringTags = new AtomicReference<>();
-        when(subscriptions.createSubscription(any())).thenAnswer(invocation -> {
+        when(subscriptions.createSubscription(any(), any())).thenAnswer(invocation -> {
             statusDuringCreate.set(account.getStatus());
             return "sub-new";
         });
@@ -125,7 +204,7 @@ class ProvisioningWorkflowTest {
     @Test
     void failedSubscriptionCreationNamesTheStep() {
         Account account = pending();
-        when(subscriptions.createSubscription(any()))
+        when(subscriptions.createSubscription(any(), any()))
                 .thenThrow(new AzureProvisioningException("quota exceeded"));
 
         workflow.runFresh("acc-1");
@@ -173,7 +252,7 @@ class ProvisioningWorkflowTest {
 
         InOrder order = inOrder(subscriptions, managementGroups);
         order.verify(subscriptions).deleteSubscription("sub-orphan");
-        order.verify(subscriptions).createSubscription("team-alpha-prod");
+        order.verify(subscriptions).createSubscription(any(), eq("team-alpha-prod"));
         order.verify(managementGroups).assignSubscription("sub-new", "mg-workloads");
         order.verify(subscriptions).applyTags("sub-new", LABELS);
 
@@ -189,7 +268,7 @@ class ProvisioningWorkflowTest {
         workflow.runRetry("acc-1");
 
         verify(subscriptions, never()).deleteSubscription(any());
-        verify(subscriptions).createSubscription("team-alpha-prod");
+        verify(subscriptions).createSubscription(any(), eq("team-alpha-prod"));
         verify(managementGroups).assignSubscription("sub-new", "mg-workloads");
         verify(subscriptions).applyTags("sub-new", LABELS);
         assertThat(account.getStatus()).isEqualTo(ProvisioningStatus.COMPLETED);
@@ -208,7 +287,7 @@ class ProvisioningWorkflowTest {
         assertThat(account.getAzureSubscriptionId())
                 .as("still there, so the next retry tries to clean it up again")
                 .isEqualTo("sub-orphan");
-        verify(subscriptions, never()).createSubscription(any());
+        verify(subscriptions, never()).createSubscription(any(), any());
         verifyNoInteractions(managementGroups);
     }
 
@@ -225,7 +304,7 @@ class ProvisioningWorkflowTest {
     void carriesTheJobIdInTheLoggingContextAndClearsItAfterwards() {
         pending();
         AtomicReference<String> jobIdDuringRun = new AtomicReference<>();
-        when(subscriptions.createSubscription(any())).thenAnswer(invocation -> {
+        when(subscriptions.createSubscription(any(), any())).thenAnswer(invocation -> {
             jobIdDuringRun.set(MDC.get("jobId"));
             return "sub-new";
         });

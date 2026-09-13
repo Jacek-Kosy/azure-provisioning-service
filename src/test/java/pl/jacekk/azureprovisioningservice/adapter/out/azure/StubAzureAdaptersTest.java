@@ -29,25 +29,57 @@ class StubAzureAdaptersTest {
 
     @Test
     void handsBackAnIdentifierTheWorkflowCanRecord() {
-        String azureSubscriptionId = subscriptions.createSubscription("team-alpha-prod");
+        String azureSubscriptionId = subscriptions.createSubscription("acct-1-1", "team-alpha-prod");
 
         assertThat(azureSubscriptionId).isNotBlank();
     }
 
     @Test
     void handsBackADistinctIdentifierPerSubscription() {
-        assertThat(subscriptions.createSubscription("team-alpha-prod"))
-                .isNotEqualTo(subscriptions.createSubscription("team-beta-prod"));
+        assertThat(subscriptions.createSubscription("acct-1-1", "team-alpha-prod"))
+                .isNotEqualTo(subscriptions.createSubscription("acct-2-1", "team-beta-prod"));
     }
 
     @Test
     void acceptsTagsAndDeletionWithoutFailingTheWorkflow() {
-        String azureSubscriptionId = subscriptions.createSubscription("team-alpha-prod");
+        String azureSubscriptionId = subscriptions.createSubscription("acct-1-1", "team-alpha-prod");
 
         assertThatCode(() -> subscriptions.applyTags(azureSubscriptionId, LABELS)).doesNotThrowAnyException();
         assertThatCode(() -> managementGroups.assignSubscription(azureSubscriptionId, "mg-workloads"))
                 .doesNotThrowAnyException();
         assertThatCode(() -> subscriptions.deleteSubscription(azureSubscriptionId)).doesNotThrowAnyException();
+    }
+
+    @Test
+    void findsACreatedSubscriptionByTheAliasItWasCreatedUnder() {
+        String azureSubscriptionId = subscriptions.createSubscription("acct-1-1", "team-alpha-prod");
+
+        assertThat(subscriptions.findSubscriptionIdByAlias("acct-1-1")).contains(azureSubscriptionId);
+    }
+
+    @Test
+    void hasNothingForAnAliasThatWasNeverUsed() {
+        assertThat(subscriptions.findSubscriptionIdByAlias("acct-never-1")).isEmpty();
+    }
+
+    @Test
+    void forgetsTheAliasOnceItsSubscriptionIsDeleted() {
+        String azureSubscriptionId = subscriptions.createSubscription("acct-1-1", "team-alpha-prod");
+
+        subscriptions.deleteSubscription(azureSubscriptionId);
+
+        assertThat(subscriptions.findSubscriptionIdByAlias("acct-1-1")).isEmpty();
+    }
+
+    @Test
+    void toleratesDeletingASubscriptionThatIsAlreadyGone() {
+        // Cleanup can legitimately run twice on the same subscription, so the port contract is that
+        // deletion is idempotent.
+        String azureSubscriptionId = subscriptions.createSubscription("acct-1-1", "team-alpha-prod");
+        subscriptions.deleteSubscription(azureSubscriptionId);
+
+        assertThatCode(() -> subscriptions.deleteSubscription(azureSubscriptionId))
+                .doesNotThrowAnyException();
     }
 
     @Test

@@ -7,7 +7,9 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.data.mongodb.core.MongoTemplate;
+import org.springframework.data.mongodb.core.query.Criteria;
 import org.springframework.data.mongodb.core.query.Query;
+import org.springframework.data.mongodb.core.query.Update;
 import org.springframework.http.MediaType;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
@@ -25,6 +27,7 @@ import java.time.Instant;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.reset;
@@ -80,7 +83,7 @@ class AccountProvisioningEndToEndIT {
     void resetState() {
         mongoTemplate.remove(new Query(), AccountDocument.class);
         reset(subscriptions, managementGroups);
-        when(subscriptions.createSubscription(any())).thenReturn("sub-1", "sub-2", "sub-3");
+        when(subscriptions.createSubscription(any(), any())).thenReturn("sub-1", "sub-2", "sub-3");
     }
 
     private String postAccount(int expectedStatus) throws Exception {
@@ -111,7 +114,7 @@ class AccountProvisioningEndToEndIT {
 
         assertThat(awaitSettled(accountId)).isEqualTo(ProvisioningStatus.COMPLETED);
 
-        verify(subscriptions).createSubscription("team-alpha-prod");
+        verify(subscriptions).createSubscription(any(), eq("team-alpha-prod"));
         verify(managementGroups).assignSubscription("sub-1", "mg-workloads");
         verify(subscriptions).applyTags(any(), any());
         mockMvc.perform(get("/accounts/" + accountId))
@@ -129,7 +132,7 @@ class AccountProvisioningEndToEndIT {
         String conflict = postAccount(409);
 
         assertThat(idOf(conflict)).isEqualTo(accountId);
-        verify(subscriptions, times(1)).createSubscription(any());
+        verify(subscriptions, times(1)).createSubscription(any(), any());
     }
 
     @Test
@@ -172,11 +175,40 @@ class AccountProvisioningEndToEndIT {
         assertThat(awaitSettled(accountId)).isEqualTo(ProvisioningStatus.COMPLETED);
 
         verify(subscriptions).deleteSubscription("sub-1");
-        verify(subscriptions, times(2)).createSubscription("team-alpha-prod");
+        verify(subscriptions, times(2)).createSubscription(any(), eq("team-alpha-prod"));
         verify(managementGroups).assignSubscription("sub-2", "mg-workloads");
         mockMvc.perform(get("/accounts/" + accountId))
                 .andExpect(jsonPath("$.azureSubscriptionId").value("sub-2"))
                 .andExpect(jsonPath("$.errorDetail").doesNotExist());
+    }
+
+    @Test
+    void recoversASubscriptionTheCrashedAttemptCreatedButNeverRecorded() throws Exception {
+        doThrow(new AzureProvisioningException("management group not found"))
+                .when(managementGroups).assignSubscription(any(), any());
+        String accountId = idOf(postAccount(202));
+        assertThat(awaitSettled(accountId)).isEqualTo(ProvisioningStatus.FAILED);
+
+        // Simulate the crash this fix exists for: Azure created sub-1, but the worker died before
+        // the id reached Mongo, so nothing in our records points at it.
+        mongoTemplate.updateFirst(
+                Query.query(Criteria.where("_id").is(accountId)),
+                new Update().unset("azureSubscriptionId"),
+                AccountDocument.class);
+        assertThat(mongoTemplate.findById(accountId, AccountDocument.class).getAzureSubscriptionId())
+                .isNull();
+        when(subscriptions.findSubscriptionIdByAlias("acct-" + accountId + "-1"))
+                .thenReturn(java.util.Optional.of("sub-1"));
+
+        doNothing().when(managementGroups).assignSubscription(any(), any());
+        postAccount(202);
+
+        assertThat(awaitSettled(accountId)).isEqualTo(ProvisioningStatus.COMPLETED);
+        verify(subscriptions)
+                .deleteSubscription("sub-1");
+        verify(subscriptions).createSubscription("acct-" + accountId + "-2", "team-alpha-prod");
+        mockMvc.perform(get("/accounts/" + accountId))
+                .andExpect(jsonPath("$.azureSubscriptionId").value("sub-2"));
     }
 
     @Test
@@ -194,6 +226,6 @@ class AccountProvisioningEndToEndIT {
         AccountDocument document = mongoTemplate.findById(accountId, AccountDocument.class);
         assertThat(document.getErrorDetail()).isEqualTo("CLEANUP_FAILED: delete rejected by Azure");
         assertThat(document.getAzureSubscriptionId()).isEqualTo("sub-1");
-        verify(subscriptions, times(1)).createSubscription(any());
+        verify(subscriptions, times(1)).createSubscription(any(), any());
     }
 }

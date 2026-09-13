@@ -93,6 +93,10 @@ class MongoAccountRepositoryAdapterIT {
         assertThat(loaded.getJobId()).isEqualTo("job-acc-1");
         assertThat(loaded.getOwnerId()).isEqualTo("replica-a");
         assertThat(loaded.getLeaseExpiresAt()).isEqualTo(NOW.plusSeconds(300));
+        assertThat(loaded.getAttempt()).isEqualTo(1);
+        assertThat(loaded.provisioningAlias())
+                .as("cleanup after a restart must derive the same alias the failed run used")
+                .isEqualTo("acct-acc-1-1");
     }
 
     @Test

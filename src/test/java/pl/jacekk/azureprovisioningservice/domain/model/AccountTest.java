@@ -191,6 +191,57 @@ class AccountTest {
     }
 
     @Test
+    void freshRequestHasNotAttemptedProvisioningYet() {
+        assertThat(pendingAccount().getAttempt()).isZero();
+    }
+
+    @Test
+    void countsEachProvisioningRunAsAnAttempt() {
+        Account account = pendingAccount();
+
+        account.startProvisioning(NOW);
+
+        assertThat(account.getAttempt()).isEqualTo(1);
+    }
+
+    @Test
+    void countsARerunAfterCleanupAsAFurtherAttempt() {
+        Account account = failedAccountWithSubscription();
+        account.startCleanup(LEASE, LATER);
+        account.markCleanedUp(LATER);
+
+        account.startProvisioning(LATER);
+
+        assertThat(account.getAttempt()).isEqualTo(2);
+    }
+
+    @Test
+    void derivesAStableAliasForTheCurrentAttempt() {
+        Account account = pendingAccount();
+        account.startProvisioning(NOW);
+
+        assertThat(account.provisioningAlias()).isEqualTo("acct-acc-1-1");
+        assertThat(account.provisioningAlias()).isEqualTo("acct-acc-1-1");
+    }
+
+    @Test
+    void keepsTheFailedRunsAliasUntilTheNextAttemptStarts() {
+        // Cleanup has to be able to name what the previous attempt created, even when that run
+        // died before recording the subscription id.
+        Account account = failedAccountWithSubscription();
+        String aliasOfTheFailedRun = account.provisioningAlias();
+
+        account.startCleanup(LEASE, LATER);
+
+        assertThat(account.provisioningAlias()).isEqualTo(aliasOfTheFailedRun);
+
+        account.markCleanedUp(LATER);
+        account.startProvisioning(LATER);
+
+        assertThat(account.provisioningAlias()).isNotEqualTo(aliasOfTheFailedRun);
+    }
+
+    @Test
     void leaseExpiryIsEvaluatedAgainstTheSuppliedInstant() {
         Account account = pendingAccount();
 

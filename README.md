@@ -108,8 +108,10 @@ endpoint, and no partial resume.
 POST (name held by a FAILED job)
   │
   ▼
-0. CLEANING_UP ── azureSubscriptionId set? ── yes ──► delete it, then clear it
-  │                                          no  ──► nothing to do
+0. CLEANING_UP ── recorded azureSubscriptionId? ── yes ──► delete it, then clear it
+  │                         │ no
+  │                         └─ look up the attempt's alias ── found ──► delete it
+  │                                                        └─ not found ──► nothing to do
   │
   ├── cleanup failed ──► FAILED, errorDetail "CLEANUP_FAILED: …", run stops here.
   │                      Step 1 is not attempted until a later retry cleans up successfully.
@@ -135,6 +137,29 @@ Two rules that are easy to get wrong and are covered by tests:
 
 `CLEANUP_FAILED:` and `Step …:` prefixes are deliberately distinct, so an operator can tell "Azure
 would not let go of the old subscription" from "the new one could not be built".
+
+### Recovering a subscription nobody recorded
+
+Cleanup cannot rely on `azureSubscriptionId` alone. A run can create a subscription and then die —
+OOM, eviction, or a lease that expired during a slow Azure call — before the id ever reaches Mongo.
+Trusting only the recorded id would mean the next retry saw nothing to clean up and created a
+*second* subscription, leaving the first orphaned with nothing pointing at it.
+
+So every attempt creates its subscription under a derived alias:
+
+```
+acct-<account id>-<attempt>        e.g. acct-7d8a6eee-…-2
+```
+
+`attempt` is incremented and persisted **before** Azure is called, and the alias is derived rather
+than stored, so there is no window in which we have asked Azure for something we cannot name. During
+cleanup — before the next attempt starts — `provisioningAlias()` still names the failed run's
+subscription, so step 0 can ask Azure what that alias created and delete it even though the id was
+never written. A crashed attempt that never reached Azure simply resolves to nothing.
+
+Note that a lease heartbeat would *not* have solved this. It would stop the sweeper falsely
+abandoning a live job, but a genuine crash mid-create leaks in exactly the same way, which is why
+the fix is recovery rather than prevention.
 
 ## Running on more than one replica
 
@@ -179,7 +204,8 @@ sweeper line together:
 
 | What | Where | Notes |
 |---|---|---|
-| Create / delete a subscription | `StubAzureSubscriptionAdapter` | Use `SubscriptionManager`. Creation means creating an **alias** against a billing scope (EA enrollment account, MCA billing profile, or MPA agreement); deletion means cancelling. The billing-scope wiring is why this ships as a stub. |
+| Create / delete a subscription | `StubAzureSubscriptionAdapter` | Use `SubscriptionManager`. Creation means creating an **alias** (`Microsoft.Subscription/aliases/{aliasName}`) against a billing scope (EA enrollment account, MCA billing profile, or MPA agreement); deletion means cancelling. The billing-scope wiring is why this ships as a stub. Deletion must be idempotent — cleanup can run twice on the same subscription. |
+| Look up an alias | `StubAzureSubscriptionAdapter.findSubscriptionIdByAlias` | **Validate this against the live API before trusting it**: the recovery path above assumes looking an alias up returns its subscription, and that re-creating an existing alias is idempotent. The stub models both with an in-memory map, which proves the contract is used but not that Azure honours it. |
 | Apply tags | `StubAzureSubscriptionAdapter.applyTags` | Same manager, on the subscription resource. |
 | Move into a management group | `StubManagementGroupAdapter` | `ManagementGroupsManager.managementGroupSubscriptions().create(groupId, subscriptionId)`. |
 | Credentials | `AzureCredentialConfig` | Already builds a `DefaultAzureCredential`; inject the `TokenCredential` into the adapters. |
@@ -201,7 +227,7 @@ Throw `AzureProvisioningException` from a port when Azure refuses — the workfl
 | `application.service` | fresh accept, 409, retry accept, the duplicate-key race; the full run, failure at each step, cleanup-then-rerun, cleanup failure stopping the run; sweeper behaviour |
 | `adapter.in.web` | 202 + `Location`, 400 on invalid labels, 409 on a duplicate, 202 on a retry, 404, response bodies |
 | `adapter.out.persistence` | unique index, CAS claim semantics, one winner among concurrent claims, optimistic locking, stale-job query |
-| `e2e` | HTTP → Mongo → async workflow, including the retry and failed-cleanup branches |
+| `e2e` | HTTP → Mongo → async workflow, including the retry, failed-cleanup, and crashed-attempt-recovery branches |
 
 The last two rows need a container runtime for Testcontainers. **They skip themselves when none is
 available** (`@Testcontainers(disabledWithoutDocker = true)`) rather than failing the build — so a

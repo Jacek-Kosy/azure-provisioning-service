@@ -27,6 +27,13 @@ public class Account {
     private String azureSubscriptionId;
     private String errorDetail;
 
+    /**
+     * How many times provisioning has been started for this account. Incremented and persisted
+     * <em>before</em> the subscription is created, so {@link #provisioningAlias()} can always name
+     * what the previous attempt built — even if that attempt died before recording anything.
+     */
+    private int attempt;
+
     /** Correlation id of the run currently owning this account. A retry mints a fresh one. */
     private String jobId;
     private String ownerId;
@@ -45,6 +52,7 @@ public class Account {
                     Instant updatedAt,
                     String azureSubscriptionId,
                     String errorDetail,
+                    int attempt,
                     String jobId,
                     String ownerId,
                     Instant leaseExpiresAt,
@@ -58,6 +66,7 @@ public class Account {
         this.updatedAt = Objects.requireNonNull(updatedAt, "updatedAt must not be null");
         this.azureSubscriptionId = azureSubscriptionId;
         this.errorDetail = errorDetail;
+        this.attempt = attempt;
         this.jobId = jobId;
         this.ownerId = ownerId;
         this.leaseExpiresAt = leaseExpiresAt;
@@ -87,9 +96,14 @@ public class Account {
 
     // --- provisioning path -------------------------------------------------------------------
 
-    /** Step 1 of a full run — reached from a fresh request or from a successful cleanup. */
+    /**
+     * Step 1 of a full run — reached from a fresh request or from a successful cleanup. Counts the
+     * attempt, which moves {@link #provisioningAlias()} on: from here until this run's outcome is
+     * known, the alias names the subscription this run is about to create.
+     */
     public void startProvisioning(Instant now) {
         transitionTo(ProvisioningStatus.CREATING_SUBSCRIPTION, now);
+        this.attempt++;
     }
 
     public void recordSubscriptionCreated(String azureSubscriptionId, Instant now) {
@@ -171,6 +185,19 @@ public class Account {
     /** Called by the persistence adapter after a successful write. */
     public void applyPersistedVersion(Long version) {
         this.version = version;
+    }
+
+    /**
+     * The Azure subscription alias this account's current attempt owns.
+     *
+     * <p>Derived rather than stored, so there is no window in which we have called Azure but have
+     * not yet recorded what we asked it for. During cleanup — before the next
+     * {@link #startProvisioning} — this still names the failed attempt's subscription, which is how
+     * a subscription created by a run that died before recording its id is found and deleted
+     * instead of leaked.
+     */
+    public String provisioningAlias() {
+        return "acct-%s-%d".formatted(id, attempt);
     }
 
     public boolean hasAzureSubscription() {

@@ -86,10 +86,10 @@ public class AsyncProvisioningWorkflow implements ProvisioningWorkflow {
      */
     private boolean cleanUp(Account account) {
         try {
-            if (account.hasAzureSubscription()) {
-                log.info("Deleting subscription {} left behind by the previous run",
-                        account.getAzureSubscriptionId());
-                subscriptions.deleteSubscription(account.getAzureSubscriptionId());
+            String orphan = orphanOf(account);
+            if (orphan != null) {
+                log.info("Deleting subscription {} left behind by the previous run", orphan);
+                subscriptions.deleteSubscription(orphan);
             }
             account.markCleanedUp(now());
             renewAndSave(account);
@@ -110,7 +110,8 @@ public class AsyncProvisioningWorkflow implements ProvisioningWorkflow {
         try {
             account.startProvisioning(now());
             renewAndSave(account);
-            String azureSubscriptionId = subscriptions.createSubscription(account.getSubscriptionName());
+            String azureSubscriptionId =
+                    subscriptions.createSubscription(account.provisioningAlias(), account.getSubscriptionName());
             account.recordSubscriptionCreated(azureSubscriptionId, now());
             renewAndSave(account);
             log.info("Created subscription {}", azureSubscriptionId);
@@ -138,6 +139,27 @@ public class AsyncProvisioningWorkflow implements ProvisioningWorkflow {
                     account.getSubscriptionName(), account.getStatus(), e);
             recordOutcome(account, () -> account.failStep(describe(e), now()));
         }
+    }
+
+    /**
+     * What the previous attempt left behind, if anything.
+     *
+     * <p>Usually the recorded id. When that is missing the attempt may still have created a
+     * subscription and died before the id reached Mongo, so the alias it would have used is looked
+     * up — otherwise that subscription is orphaned in Azure with nothing pointing at it, and the
+     * rerun quietly creates a second one alongside it.
+     */
+    private String orphanOf(Account account) {
+        if (account.hasAzureSubscription()) {
+            return account.getAzureSubscriptionId();
+        }
+        String alias = account.provisioningAlias();
+        String recovered = subscriptions.findSubscriptionIdByAlias(alias).orElse(null);
+        if (recovered != null) {
+            log.warn("Recovered untracked subscription {} from alias {}; the attempt that created "
+                    + "it died before recording the id", recovered, alias);
+        }
+        return recovered;
     }
 
     /**

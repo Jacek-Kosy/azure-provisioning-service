@@ -130,11 +130,33 @@ controller never sees it.
 
 **Retry path** (only for a request accepted as a retry of a `FAILED` account):
 
-0. Status is already `CLEANING_UP` from the claim. If `azureSubscriptionId` is set — whichever
-   later step originally failed — `AzureSubscriptionPort.deleteSubscription` is called and the
-   id is cleared. If cleanup itself fails, the account goes to `FAILED` with a
-   `CLEANUP_FAILED: …` `errorDetail`, distinct from a provisioning failure, and the run stops.
-   Step 1 is not attempted until a later retry cleans up successfully.
+0. Status is already `CLEANING_UP` from the claim. Cleanup deletes whatever the previous attempt
+   left behind, found in one of two ways: the recorded `azureSubscriptionId`, or — when that is
+   missing because the attempt died before writing it — by asking Azure what the attempt's alias
+   created (see "Recovering an unrecorded subscription"). The id is then cleared. If cleanup itself
+   fails, the account goes to `FAILED` with a `CLEANUP_FAILED: …` `errorDetail`, distinct from a
+   provisioning failure, and the run stops. Step 1 is not attempted until a later retry cleans up
+   successfully.
+
+### Recovering an unrecorded subscription
+
+A run can create a subscription and die before the id reaches Mongo — the replica is evicted, or
+its lease expires during a slow Azure call and the sweeper marks the job `FAILED` underneath it. If
+cleanup trusted only the recorded id, the retry would find nothing to delete and create a second
+subscription, orphaning the first with nothing in the system pointing at it.
+
+`Account` therefore carries an `attempt` counter, incremented by `startProvisioning` and persisted
+before Azure is called, and derives `provisioningAlias()` as `acct-<id>-<attempt>`. Deriving rather
+than storing the alias removes any window between asking Azure for something and being able to name
+it. Because the counter only moves when the next attempt starts, the alias during cleanup still
+names the failed attempt's subscription.
+
+A lease heartbeat was considered and rejected as insufficient: it removes false abandonment, but a
+genuine crash mid-create leaks identically. The fix has to be recovery, not prevention.
+
+This encodes two assumptions about Azure that the stubs cannot verify — that an alias can be looked
+up to find its subscription, and that re-creating an existing alias is idempotent. Both must be
+validated when the real adapter is written.
 
 **Provisioning path** (fresh request, or a retry whose cleanup succeeded). Always a full rerun
 from step 1 — no step is skipped on the basis of what succeeded before:
