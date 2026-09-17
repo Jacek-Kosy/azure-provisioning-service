@@ -7,7 +7,6 @@ import org.junit.jupiter.params.provider.EnumSource;
 import static org.assertj.core.api.Assertions.assertThat;
 import static pl.jacekk.azureprovisioningservice.domain.model.ProvisioningStatus.APPLYING_LABELS;
 import static pl.jacekk.azureprovisioningservice.domain.model.ProvisioningStatus.ASSIGNING_MANAGEMENT_GROUP;
-import static pl.jacekk.azureprovisioningservice.domain.model.ProvisioningStatus.CLEANING_UP;
 import static pl.jacekk.azureprovisioningservice.domain.model.ProvisioningStatus.COMPLETED;
 import static pl.jacekk.azureprovisioningservice.domain.model.ProvisioningStatus.CREATING_SUBSCRIPTION;
 import static pl.jacekk.azureprovisioningservice.domain.model.ProvisioningStatus.FAILED;
@@ -20,7 +19,6 @@ class ProvisioningStatusTest {
         assertThat(COMPLETED.isTerminal()).isTrue();
         assertThat(FAILED.isTerminal()).isTrue();
         assertThat(PENDING.isTerminal()).isFalse();
-        assertThat(CLEANING_UP.isTerminal()).isFalse();
         assertThat(CREATING_SUBSCRIPTION.isTerminal()).isFalse();
     }
 
@@ -46,10 +44,9 @@ class ProvisioningStatusTest {
     }
 
     @Test
-    void allowsRetryClaimAndCleanupOutcomes() {
-        assertThat(FAILED.canTransitionTo(CLEANING_UP)).isTrue();
-        assertThat(CLEANING_UP.canTransitionTo(CREATING_SUBSCRIPTION)).isTrue();
-        assertThat(CLEANING_UP.canTransitionTo(FAILED)).isTrue();
+    void sendsARetryBackToTheStartRatherThanIntoACleanupState() {
+        // Every step reconciles, so a retry is simply a fresh run.
+        assertThat(FAILED.canTransitionTo(PENDING)).isTrue();
     }
 
     @Test
@@ -64,7 +61,7 @@ class ProvisioningStatusTest {
     void forbidsStepSkippingAndResurrection() {
         assertThat(PENDING.canTransitionTo(APPLYING_LABELS)).isFalse();
         assertThat(CREATING_SUBSCRIPTION.canTransitionTo(COMPLETED)).isFalse();
-        assertThat(COMPLETED.canTransitionTo(CLEANING_UP)).isFalse();
+        assertThat(COMPLETED.canTransitionTo(PENDING)).isFalse();
         assertThat(COMPLETED.canTransitionTo(FAILED)).isFalse();
         assertThat(FAILED.canTransitionTo(CREATING_SUBSCRIPTION)).isFalse();
     }

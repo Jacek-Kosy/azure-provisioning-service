@@ -159,7 +159,7 @@ class AccountControllerTest {
     void returnsTheCurrentStateOfAJob() throws Exception {
         Account account = account("acc-1");
         account.startProvisioning(NOW);
-        account.recordSubscriptionCreated("sub-123", NOW);
+        account.recordSubscription("sub-123", NOW);
         when(getAccountStatus.getAccount("acc-1")).thenReturn(account);
 
         mockMvc.perform(get("/accounts/acc-1"))
@@ -178,7 +178,7 @@ class AccountControllerTest {
     void reportsWhyAFailedJobFailed() throws Exception {
         Account account = account("acc-1");
         account.startProvisioning(NOW);
-        account.recordSubscriptionCreated("sub-123", NOW);
+        account.recordSubscription("sub-123", NOW);
         account.startAssigningManagementGroup(NOW);
         account.failStep("management group not found", NOW);
         when(getAccountStatus.getAccount("acc-1")).thenReturn(account);

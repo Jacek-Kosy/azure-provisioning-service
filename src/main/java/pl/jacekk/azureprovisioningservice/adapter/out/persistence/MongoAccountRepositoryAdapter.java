@@ -60,7 +60,8 @@ public class MongoAccountRepositoryAdapter implements AccountRepositoryPort {
     /**
      * One conditional update, not a read followed by a write: the filter itself requires the
      * account to still be FAILED, so when several replicas accept the same retry at the same
-     * moment, exactly one of them gets a document back and starts the run.
+     * moment, exactly one of them gets a document back and starts the run. The claim sends the
+     * account back to PENDING — a retry is simply the run again, since every step reconciles.
      */
     @Override
     public Optional<Account> claimForRetry(String subscriptionName, JobLease lease, Instant now) {
@@ -68,7 +69,7 @@ public class MongoAccountRepositoryAdapter implements AccountRepositoryPort {
                 .where("subscriptionName").is(subscriptionName)
                 .and("status").is(ProvisioningStatus.FAILED));
         Update claim = new Update()
-                .set("status", ProvisioningStatus.CLEANING_UP)
+                .set("status", ProvisioningStatus.PENDING)
                 .set("jobId", lease.jobId())
                 .set("ownerId", lease.ownerId())
                 .set("leaseExpiresAt", lease.expiresAt())

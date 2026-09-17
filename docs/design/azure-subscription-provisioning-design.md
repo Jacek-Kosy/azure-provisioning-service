@@ -47,20 +47,17 @@ state, and it is what makes concurrency safe. See "Concurrency" below.
 succeeds), `errorDetail` (null unless failed), plus three fields that exist for coordination:
 `jobId`, `ownerId`, `leaseExpiresAt`.
 
-The aggregate exposes transitions, not setters — `startProvisioning()`, `recordSubscriptionCreated(id)`,
+The aggregate exposes transitions, not setters — `startProvisioning()`, `recordSubscription(id)`,
 `startAssigningManagementGroup()`, `startApplyingLabels()`, `complete()`, `failStep(cause)`,
-`failCleanup(cause)`, `clearAzureSubscriptionId()`. Each one validates the move against the
-state machine and throws `IllegalStatusTransitionException` otherwise, so an out-of-order
-workflow is a test failure rather than a corrupt document.
+`startRetry(lease)`, `abandon()`. Each one validates the move against the state machine and throws
+`IllegalStatusTransitionException` otherwise, so an out-of-order workflow is a test failure rather
+than a corrupt document.
 
 ```
-PENDING ────────────────────────► CREATING_SUBSCRIPTION ──► ASSIGNING_MANAGEMENT_GROUP
-   ▲                                      │                          │
-   │                                      ▼                          ▼
-CLEANING_UP ◄── (retry of FAILED)      FAILED ◄──────────── APPLYING_LABELS ──► COMPLETED
-   │                                      ▲                          │
-   └──────── cleanup ok ──► CREATING…     └──────────────────────────┘
-   └──────── cleanup failed ──────────────┘
+PENDING ──► CREATING_SUBSCRIPTION ──► ASSIGNING_MANAGEMENT_GROUP ──► APPLYING_LABELS ──► COMPLETED
+   ▲                  │                          │                         │
+   │                  └──────────────────────────┴─────────────────────────┴──► FAILED
+   └───────────────────────────── (retry claim) ─────────────────────────────────┘
 ```
 
 `Labels` is a value object over the tag map. It owns the four required keys as constants
@@ -128,47 +125,41 @@ Orchestrated by `ProvisioningWorkflow` in the application layer — a separate b
 `AccountProvisioningService` because `@Async` self-invocation is silently synchronous. The
 controller never sees it.
 
-**Retry path** (only for a request accepted as a retry of a `FAILED` account):
+Every step states a desired end state rather than an action, so running it twice is harmless:
 
-0. Status is already `CLEANING_UP` from the claim. Cleanup deletes whatever the previous attempt
-   left behind, found in one of two ways: the recorded `azureSubscriptionId`, or — when that is
-   missing because the attempt died before writing it — by asking Azure what the attempt's alias
-   created (see "Recovering an unrecorded subscription"). The id is then cleared. If cleanup itself
-   fails, the account goes to `FAILED` with a `CLEANUP_FAILED: …` `errorDetail`, distinct from a
-   provisioning failure, and the run stops. Step 1 is not attempted until a later retry cleans up
-   successfully.
-
-### Recovering an unrecorded subscription
-
-A run can create a subscription and die before the id reaches Mongo — the replica is evicted, or
-its lease expires during a slow Azure call and the sweeper marks the job `FAILED` underneath it. If
-cleanup trusted only the recorded id, the retry would find nothing to delete and create a second
-subscription, orphaning the first with nothing in the system pointing at it.
-
-`Account` therefore carries an `attempt` counter, incremented by `startProvisioning` and persisted
-before Azure is called, and derives `provisioningAlias()` as `acct-<id>-<attempt>`. Deriving rather
-than storing the alias removes any window between asking Azure for something and being able to name
-it. Because the counter only moves when the next attempt starts, the alias during cleanup still
-names the failed attempt's subscription.
-
-A lease heartbeat was considered and rejected as insufficient: it removes false abandonment, but a
-genuine crash mid-create leaks identically. The fix has to be recovery, not prevention.
-
-This encodes two assumptions about Azure that the stubs cannot verify — that an alias can be looked
-up to find its subscription, and that re-creating an existing alias is idempotent. Both must be
-validated when the real adapter is written.
-
-**Provisioning path** (fresh request, or a retry whose cleanup succeeded). Always a full rerun
-from step 1 — no step is skipped on the basis of what succeeded before:
-
-1. `CREATING_SUBSCRIPTION` → `AzureSubscriptionPort.createSubscription`, capture the id.
-2. `ASSIGNING_MANAGEMENT_GROUP` → `ManagementGroupPort.assignSubscription`.
-3. `APPLYING_LABELS` → `AzureSubscriptionPort.applyTags` with the four validated labels.
+1. `CREATING_SUBSCRIPTION` → `ensureSubscription(alias, name)` — creates, or adopts what an earlier
+   run built. The id is recorded.
+2. `ASSIGNING_MANAGEMENT_GROUP` → `ensurePlacedUnder(id, group)` — moves only if it is elsewhere.
+3. `APPLYING_LABELS` → `ensureTags(id, labels)` — writes only if the tags differ.
 4. `COMPLETED`.
 
-Any step failure → `FAILED` with an `errorDetail` naming the step and the cause. The
-partially-created subscription is deliberately **left in place**; it is cleaned up by step 0 of
-the next retry, not immediately.
+A step failure records `Step <STATUS> failed: <cause>` and leaves everything built so far in place.
+
+**There is no retry path**, because a retry is this path again. The claim sends a `FAILED` account
+back to `PENDING`, and the workflow cannot tell it apart from a fresh request. This replaces the
+earlier cleanup-then-full-rerun design, in which a retry deleted the previous attempt's subscription
+and built a new one.
+
+The reason is that a recorded step position is a hint, not a fact: the status write and the Azure
+call cannot be atomic, so "failed at step 2" never means "step 2 did not happen". Skipping work has
+to be decided by observing the provider, which is authoritative, rather than by reading our own
+bookkeeping, which is the first thing lost when a replica dies. Making each step reconcile also
+removes the need to destroy anything, which matters for the later multi-cloud question — AWS
+accounts cannot be deleted at all.
+
+### The alias, and why it never moves
+
+Each account owns one alias, `acct-<account id>`, derived rather than stored and stable for the life
+of the account. Step 1 uses it to find and adopt an existing subscription.
+
+It also covers the case where a run created a subscription and died before the id reached Mongo: the
+alias still names it, so the next run adopts it rather than orphaning it and building a second.
+`recordSubscription` refuses to replace an id it already holds with a different one — that would
+mean two subscriptions for one account, and it fails loudly instead.
+
+This encodes two assumptions about Azure that the stubs cannot verify: that an alias can be looked
+up to find its subscription, and that re-creating an existing alias is idempotent. Both must be
+validated when the real adapter is written.
 
 ## Extension seams
 
@@ -199,10 +190,10 @@ OAuth2 resource server) is a change to `SecurityConfig` alone.
 
 | Layer | Test | Covers |
 |---|---|---|
-| domain | `AccountTest`, `LabelsTest` | every legal transition, rejection of illegal ones, cleanup clearing the id, error-detail shape |
+| domain | `AccountTest`, `LabelsTest` | every legal transition, rejection of illegal ones, the stable alias, refusing to swap a recorded subscription |
 | validation | `RuleBasedLabelValidatorTest` | all four keys required, blank rejected, unknown extra keys, rule composition |
 | application | `AccountProvisioningServiceTest` | fresh accept, 409 on non-FAILED duplicate, retry accept, duplicate-key race, validation before persistence |
-| application | `ProvisioningWorkflowTest` | happy path, failure at each step, retry cleanup-then-full-rerun, cleanup failure stopping the run, no step skipping |
+| application | `ProvisioningWorkflowTest` | happy path, failure at each step, a rerun adopting the previous run's subscription — recorded or not — and a rerun over already-correct state |
 | application | `StaleJobSweeperTest` | expired lease abandoned, live lease untouched, terminal jobs ignored |
 | persistence | `MongoAccountRepositoryAdapterIT` (Testcontainers) | unique index on name, CAS claim semantics, exactly one winner under concurrent claims |
 | web | `AccountControllerTest` (MockMvc) | 202 + Location fresh, 400 invalid labels, 409 duplicate, 202 retry, 404 unknown, response body |

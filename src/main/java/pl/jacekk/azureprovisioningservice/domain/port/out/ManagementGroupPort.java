@@ -1,10 +1,12 @@
 package pl.jacekk.azureprovisioningservice.domain.port.out;
 
-/** Placing a subscription under its target management group. */
+/** Where the subscription sits in the management-group hierarchy. */
 public interface ManagementGroupPort {
 
     /**
+     * Ensures the subscription sits directly under the given management group.
+     *
      * @throws AzureProvisioningException when the move is refused
      */
-    void assignSubscription(String azureSubscriptionId, String managementGroupId);
+    ReconcileOutcome ensurePlacedUnder(String azureSubscriptionId, String managementGroupId);
 }

@@ -75,7 +75,7 @@ public class AccountProvisioningService implements CreateAccountUseCase, GetAcco
             Account inserted = accounts.insertNew(account);
             withJobContext(inserted, () -> log.info("Accepted a new provisioning job for subscription '{}'",
                     inserted.getSubscriptionName()));
-            workflow.runFresh(inserted.getId());
+            workflow.run(inserted.getId());
             return new AccountAcceptance(inserted.getId(), AcceptanceOutcome.CREATED);
         } catch (DuplicateSubscriptionNameException e) {
             return acceptRetryOrReportConflict(command.subscriptionName(), now);
@@ -92,9 +92,9 @@ public class AccountProvisioningService implements CreateAccountUseCase, GetAcco
         if (claimed.isPresent()) {
             Account account = claimed.get();
             withJobContext(account, () -> log.info(
-                    "Accepted a retry for subscription '{}'; cleaning up before a full rerun",
+                    "Accepted a retry for subscription '{}'; every step will reconcile",
                     account.getSubscriptionName()));
-            workflow.runRetry(account.getId());
+            workflow.run(account.getId());
             return new AccountAcceptance(account.getId(), AcceptanceOutcome.RETRY_ACCEPTED);
         }
 

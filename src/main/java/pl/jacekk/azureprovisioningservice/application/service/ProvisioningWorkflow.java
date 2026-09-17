@@ -7,9 +7,6 @@ package pl.jacekk.azureprovisioningservice.application.service;
  */
 public interface ProvisioningWorkflow {
 
-    /** A brand new job: run every step from step 1. */
-    void runFresh(String accountId);
-
-    /** A retry: clean up what the previous run left behind, then run every step from step 1. */
-    void runRetry(String accountId);
+    /** Runs every step. A retry is the same thing as a fresh run, because each step reconciles. */
+    void run(String accountId);
 }

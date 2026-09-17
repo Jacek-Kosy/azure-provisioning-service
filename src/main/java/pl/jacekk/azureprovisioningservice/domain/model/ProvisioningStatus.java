@@ -14,7 +14,6 @@ import java.util.Set;
 public enum ProvisioningStatus {
 
     PENDING,
-    CLEANING_UP,
     CREATING_SUBSCRIPTION,
     ASSIGNING_MANAGEMENT_GROUP,
     APPLYING_LABELS,
@@ -40,14 +39,13 @@ public enum ProvisioningStatus {
 
     private Set<ProvisioningStatus> allowedTargets() {
         return switch (this) {
-            // A fresh job, or one whose cleanup succeeded, starts the full run at step 1.
-            case PENDING, CLEANING_UP -> EnumSet.of(CREATING_SUBSCRIPTION, FAILED);
+            case PENDING -> EnumSet.of(CREATING_SUBSCRIPTION, FAILED);
             case CREATING_SUBSCRIPTION -> EnumSet.of(ASSIGNING_MANAGEMENT_GROUP, FAILED);
             case ASSIGNING_MANAGEMENT_GROUP -> EnumSet.of(APPLYING_LABELS, FAILED);
             case APPLYING_LABELS -> EnumSet.of(COMPLETED, FAILED);
             case COMPLETED -> EnumSet.noneOf(ProvisioningStatus.class);
-            // The retry claim, and nothing else.
-            case FAILED -> EnumSet.of(CLEANING_UP);
+            // A retry restarts the run. Every step reconciles, so there is nothing to undo first.
+            case FAILED -> EnumSet.of(PENDING);
         };
     }
 }

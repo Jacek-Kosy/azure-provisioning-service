@@ -29,7 +29,7 @@ class AccountTest {
     private static Account failedAccountWithSubscription() {
         Account account = pendingAccount();
         account.startProvisioning(NOW);
-        account.recordSubscriptionCreated("sub-123", NOW);
+        account.recordSubscription("sub-123", NOW);
         account.startAssigningManagementGroup(NOW);
         account.failStep("management group not found", NOW);
         return account;
@@ -59,7 +59,7 @@ class AccountTest {
         account.startProvisioning(LATER);
         assertThat(account.getStatus()).isEqualTo(ProvisioningStatus.CREATING_SUBSCRIPTION);
 
-        account.recordSubscriptionCreated("sub-123", LATER);
+        account.recordSubscription("sub-123", LATER);
         assertThat(account.getAzureSubscriptionId()).isEqualTo("sub-123");
         assertThat(account.getStatus()).isEqualTo(ProvisioningStatus.CREATING_SUBSCRIPTION);
 
@@ -100,12 +100,12 @@ class AccountTest {
     void rejectsTransitionsOutOfATerminalStatus() {
         Account account = pendingAccount();
         account.startProvisioning(NOW);
-        account.recordSubscriptionCreated("sub-123", NOW);
+        account.recordSubscription("sub-123", NOW);
         account.startAssigningManagementGroup(NOW);
         account.startApplyingLabels(NOW);
         account.complete(NOW);
 
-        assertThatThrownBy(() -> account.startCleanup(LEASE, LATER))
+        assertThatThrownBy(() -> account.startRetry(LEASE, LATER))
                 .isInstanceOf(IllegalStatusTransitionException.class);
     }
 
@@ -131,51 +131,57 @@ class AccountTest {
         Account account = failedAccountWithSubscription();
         JobLease retryLease = new JobLease("job-2", "replica-b", LATER.plusSeconds(60));
 
-        account.startCleanup(retryLease, LATER);
+        account.startRetry(retryLease, LATER);
 
-        assertThat(account.getStatus()).isEqualTo(ProvisioningStatus.CLEANING_UP);
+        assertThat(account.getStatus()).isEqualTo(ProvisioningStatus.PENDING);
         assertThat(account.getErrorDetail()).isNull();
         assertThat(account.getJobId()).isEqualTo("job-2");
         assertThat(account.getOwnerId()).isEqualTo("replica-b");
-        assertThat(account.getAzureSubscriptionId())
-                .as("the orphaned subscription is still there until cleanup deletes it")
-                .isEqualTo("sub-123");
     }
 
     @Test
-    void cleanupClearsTheAzureSubscriptionId() {
+    void retryKeepsWhatTheFailedRunAlreadyBuilt() {
+        // Nothing is destroyed: the rerun adopts this subscription instead of creating a second.
         Account account = failedAccountWithSubscription();
-        account.startCleanup(LEASE, LATER);
 
-        account.markCleanedUp(LATER);
+        account.startRetry(LEASE, LATER);
 
-        assertThat(account.getAzureSubscriptionId()).isNull();
-        assertThat(account.hasAzureSubscription()).isFalse();
-        assertThat(account.getStatus()).isEqualTo(ProvisioningStatus.CLEANING_UP);
+        assertThat(account.getAzureSubscriptionId()).isEqualTo("sub-123");
     }
 
     @Test
-    void cleanupFailureIsDistinguishableFromAProvisioningFailure() {
+    void rerunAfterARetryStartsAgainAtStepOne() {
         Account account = failedAccountWithSubscription();
-        account.startCleanup(LEASE, LATER);
-
-        account.failCleanup("delete rejected by Azure", LATER);
-
-        assertThat(account.getStatus()).isEqualTo(ProvisioningStatus.FAILED);
-        assertThat(account.getErrorDetail()).isEqualTo("CLEANUP_FAILED: delete rejected by Azure");
-        assertThat(account.getErrorDetail()).doesNotContain("Step ");
-    }
-
-    @Test
-    void rerunAfterCleanupStartsAgainAtStepOne() {
-        Account account = failedAccountWithSubscription();
-        account.startCleanup(LEASE, LATER);
-        account.markCleanedUp(LATER);
+        account.startRetry(LEASE, LATER);
 
         account.startProvisioning(LATER);
 
         assertThat(account.getStatus()).isEqualTo(ProvisioningStatus.CREATING_SUBSCRIPTION);
-        assertThat(account.getAzureSubscriptionId()).isNull();
+    }
+
+    @Test
+    void recordingTheSameSubscriptionTwiceIsHarmless() {
+        Account account = pendingAccount();
+        account.startProvisioning(NOW);
+        account.recordSubscription("sub-123", NOW);
+
+        account.recordSubscription("sub-123", LATER);
+
+        assertThat(account.getAzureSubscriptionId()).isEqualTo("sub-123");
+    }
+
+    @Test
+    void refusesToSwapOutASubscriptionItAlreadyRecorded() {
+        // Two subscriptions for one account means adoption went wrong. Fail loudly rather than
+        // silently forgetting the first one.
+        Account account = pendingAccount();
+        account.startProvisioning(NOW);
+        account.recordSubscription("sub-123", NOW);
+
+        assertThatThrownBy(() -> account.recordSubscription("sub-999", LATER))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("sub-123")
+                .hasMessageContaining("sub-999");
     }
 
     @Test
@@ -191,54 +197,20 @@ class AccountTest {
     }
 
     @Test
-    void freshRequestHasNotAttemptedProvisioningYet() {
-        assertThat(pendingAccount().getAttempt()).isZero();
-    }
-
-    @Test
-    void countsEachProvisioningRunAsAnAttempt() {
+    void namesItsSubscriptionWithAnAliasThatNeverChanges() {
+        // The alias is how a rerun finds what an earlier run built — including a run that died
+        // before it could record the subscription id. It must never move.
         Account account = pendingAccount();
 
+        assertThat(account.provisioningAlias()).isEqualTo("acct-acc-1");
+
         account.startProvisioning(NOW);
+        assertThat(account.provisioningAlias()).isEqualTo("acct-acc-1");
 
-        assertThat(account.getAttempt()).isEqualTo(1);
-    }
-
-    @Test
-    void countsARerunAfterCleanupAsAFurtherAttempt() {
-        Account account = failedAccountWithSubscription();
-        account.startCleanup(LEASE, LATER);
-        account.markCleanedUp(LATER);
-
+        account.failStep("boom", NOW);
+        account.startRetry(LEASE, LATER);
         account.startProvisioning(LATER);
-
-        assertThat(account.getAttempt()).isEqualTo(2);
-    }
-
-    @Test
-    void derivesAStableAliasForTheCurrentAttempt() {
-        Account account = pendingAccount();
-        account.startProvisioning(NOW);
-
-        assertThat(account.provisioningAlias()).isEqualTo("acct-acc-1-1");
-        assertThat(account.provisioningAlias()).isEqualTo("acct-acc-1-1");
-    }
-
-    @Test
-    void keepsTheFailedRunsAliasUntilTheNextAttemptStarts() {
-        // Cleanup has to be able to name what the previous attempt created, even when that run
-        // died before recording the subscription id.
-        Account account = failedAccountWithSubscription();
-        String aliasOfTheFailedRun = account.provisioningAlias();
-
-        account.startCleanup(LEASE, LATER);
-
-        assertThat(account.provisioningAlias()).isEqualTo(aliasOfTheFailedRun);
-
-        account.markCleanedUp(LATER);
-        account.startProvisioning(LATER);
-
-        assertThat(account.provisioningAlias()).isNotEqualTo(aliasOfTheFailedRun);
+        assertThat(account.provisioningAlias()).isEqualTo("acct-acc-1");
     }
 
     @Test

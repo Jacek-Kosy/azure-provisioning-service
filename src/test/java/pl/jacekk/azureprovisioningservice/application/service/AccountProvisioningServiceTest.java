@@ -106,8 +106,7 @@ class AccountProvisioningServiceTest {
         assertThat(inserted.getValue().getStatus()).isEqualTo(ProvisioningStatus.PENDING);
         assertThat(inserted.getValue().getSubscriptionName()).isEqualTo("team-alpha-prod");
         assertThat(inserted.getValue().getLabels()).isEqualTo(Labels.of(VALID_LABELS));
-        verify(workflow).runFresh(acceptance.accountId());
-        verify(workflow, never()).runRetry(any());
+        verify(workflow).run(acceptance.accountId());
     }
 
     @Test
@@ -139,7 +138,7 @@ class AccountProvisioningServiceTest {
     @Test
     void acceptsARetryWhenTheClaimOnAFailedJobSucceeds() {
         Account claimed = existingAccount(ProvisioningStatus.FAILED);
-        claimed.startCleanup(new JobLease("job-new", "replica-a", NOW.plusSeconds(300)), NOW);
+        claimed.startRetry(new JobLease("job-new", "replica-a", NOW.plusSeconds(300)), NOW);
         when(accounts.insertNew(any())).thenThrow(new DuplicateSubscriptionNameException("team-alpha-prod"));
         when(accounts.claimForRetry(eq("team-alpha-prod"), any(), any())).thenReturn(Optional.of(claimed));
 
@@ -147,14 +146,13 @@ class AccountProvisioningServiceTest {
 
         assertThat(acceptance.outcome()).isEqualTo(AcceptanceOutcome.RETRY_ACCEPTED);
         assertThat(acceptance.accountId()).isEqualTo("acc-existing");
-        verify(workflow).runRetry("acc-existing");
-        verify(workflow, never()).runFresh(any());
+        verify(workflow).run("acc-existing");
     }
 
     @Test
     void claimsTheRetryUnderAFreshCorrelationIdAndLease() {
         Account claimed = existingAccount(ProvisioningStatus.FAILED);
-        claimed.startCleanup(new JobLease("job-new", "replica-a", NOW.plusSeconds(300)), NOW);
+        claimed.startRetry(new JobLease("job-new", "replica-a", NOW.plusSeconds(300)), NOW);
         when(accounts.insertNew(any())).thenThrow(new DuplicateSubscriptionNameException("team-alpha-prod"));
         when(accounts.claimForRetry(any(), any(), any())).thenReturn(Optional.of(claimed));
 

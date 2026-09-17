@@ -40,9 +40,6 @@ public class AccountDocument {
     private String azureSubscriptionId;
     private String errorDetail;
 
-    /** Which provisioning attempt this is; part of the alias the cleanup path reconstructs. */
-    private int attempt;
-
     private String jobId;
     private String ownerId;
     private Instant leaseExpiresAt;

@@ -69,7 +69,7 @@ class MongoAccountRepositoryAdapterIT {
     private static Account failedWithOrphan(String id, String subscriptionName) {
         Account account = pending(id, subscriptionName);
         account.startProvisioning(NOW);
-        account.recordSubscriptionCreated("sub-orphan", NOW);
+        account.recordSubscription("sub-orphan", NOW);
         account.startAssigningManagementGroup(NOW);
         account.failStep("management group not found", NOW);
         return account;
@@ -93,10 +93,9 @@ class MongoAccountRepositoryAdapterIT {
         assertThat(loaded.getJobId()).isEqualTo("job-acc-1");
         assertThat(loaded.getOwnerId()).isEqualTo("replica-a");
         assertThat(loaded.getLeaseExpiresAt()).isEqualTo(NOW.plusSeconds(300));
-        assertThat(loaded.getAttempt()).isEqualTo(1);
         assertThat(loaded.provisioningAlias())
-                .as("cleanup after a restart must derive the same alias the failed run used")
-                .isEqualTo("acct-acc-1-1");
+                .as("a run on another replica must derive the same alias to adopt what exists")
+                .isEqualTo("acct-acc-1");
     }
 
     @Test
@@ -136,16 +135,16 @@ class MongoAccountRepositoryAdapterIT {
 
         Account claimed = accounts.claimForRetry("team-alpha-prod", lease, NOW).orElseThrow();
 
-        assertThat(claimed.getStatus()).isEqualTo(ProvisioningStatus.CLEANING_UP);
+        assertThat(claimed.getStatus()).isEqualTo(ProvisioningStatus.PENDING);
         assertThat(claimed.getErrorDetail()).isNull();
         assertThat(claimed.getJobId()).isEqualTo("job-2");
         assertThat(claimed.getOwnerId()).isEqualTo("replica-b");
         assertThat(claimed.getLeaseExpiresAt()).isEqualTo(NOW.plusSeconds(600));
         assertThat(claimed.getAzureSubscriptionId())
-                .as("the orphan stays until cleanup deletes it")
+                .as("kept, so the rerun adopts it")
                 .isEqualTo("sub-orphan");
         assertThat(accounts.findById("acc-1").orElseThrow().getStatus())
-                .isEqualTo(ProvisioningStatus.CLEANING_UP);
+                .isEqualTo(ProvisioningStatus.PENDING);
     }
 
     @Test
@@ -203,7 +202,7 @@ class MongoAccountRepositoryAdapterIT {
     void persistsStateAdvancedInMemory() {
         Account account = accounts.insertNew(pending("acc-1", "team-alpha-prod"));
         account.startProvisioning(NOW.plusSeconds(1));
-        account.recordSubscriptionCreated("sub-123", NOW.plusSeconds(2));
+        account.recordSubscription("sub-123", NOW.plusSeconds(2));
 
         accounts.save(account);
 
@@ -235,7 +234,7 @@ class MongoAccountRepositoryAdapterIT {
         accounts.claimForRetry("team-alpha-prod",
                 new JobLease("job-2", "replica-b", NOW.plusSeconds(600)), NOW).orElseThrow();
 
-        staleRead.startCleanup(new JobLease("job-3", "replica-c", NOW.plusSeconds(600)), NOW);
+        staleRead.startRetry(new JobLease("job-3", "replica-c", NOW.plusSeconds(600)), NOW);
         assertThatThrownBy(() -> accounts.save(staleRead))
                 .isInstanceOf(ConcurrentAccountModificationException.class);
     }
@@ -254,7 +253,7 @@ class MongoAccountRepositoryAdapterIT {
 
         Account finished = pending("acc-done", "done-name");
         finished.startProvisioning(NOW);
-        finished.recordSubscriptionCreated("sub-1", NOW);
+        finished.recordSubscription("sub-1", NOW);
         finished.startAssigningManagementGroup(NOW);
         finished.startApplyingLabels(NOW);
         finished.complete(NOW);

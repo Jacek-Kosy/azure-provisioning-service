@@ -27,13 +27,6 @@ public class Account {
     private String azureSubscriptionId;
     private String errorDetail;
 
-    /**
-     * How many times provisioning has been started for this account. Incremented and persisted
-     * <em>before</em> the subscription is created, so {@link #provisioningAlias()} can always name
-     * what the previous attempt built — even if that attempt died before recording anything.
-     */
-    private int attempt;
-
     /** Correlation id of the run currently owning this account. A retry mints a fresh one. */
     private String jobId;
     private String ownerId;
@@ -52,7 +45,6 @@ public class Account {
                     Instant updatedAt,
                     String azureSubscriptionId,
                     String errorDetail,
-                    int attempt,
                     String jobId,
                     String ownerId,
                     Instant leaseExpiresAt,
@@ -66,7 +58,6 @@ public class Account {
         this.updatedAt = Objects.requireNonNull(updatedAt, "updatedAt must not be null");
         this.azureSubscriptionId = azureSubscriptionId;
         this.errorDetail = errorDetail;
-        this.attempt = attempt;
         this.jobId = jobId;
         this.ownerId = ownerId;
         this.leaseExpiresAt = leaseExpiresAt;
@@ -96,19 +87,24 @@ public class Account {
 
     // --- provisioning path -------------------------------------------------------------------
 
-    /**
-     * Step 1 of a full run — reached from a fresh request or from a successful cleanup. Counts the
-     * attempt, which moves {@link #provisioningAlias()} on: from here until this run's outcome is
-     * known, the alias names the subscription this run is about to create.
-     */
+    /** Step 1 of a run. A retry arrives here exactly as a fresh request does. */
     public void startProvisioning(Instant now) {
         transitionTo(ProvisioningStatus.CREATING_SUBSCRIPTION, now);
-        this.attempt++;
     }
 
-    public void recordSubscriptionCreated(String azureSubscriptionId, Instant now) {
+    /**
+     * Records the subscription this account owns, whether step 1 created it or adopted one an
+     * earlier run had already built. Being handed a <em>different</em> id means two subscriptions
+     * exist for one account, so it fails loudly rather than forgetting the first.
+     */
+    public void recordSubscription(String azureSubscriptionId, Instant now) {
         requireStatus(ProvisioningStatus.CREATING_SUBSCRIPTION);
-        this.azureSubscriptionId = Objects.requireNonNull(azureSubscriptionId, "azureSubscriptionId must not be null");
+        Objects.requireNonNull(azureSubscriptionId, "azureSubscriptionId must not be null");
+        if (hasAzureSubscription() && !this.azureSubscriptionId.equals(azureSubscriptionId)) {
+            throw new IllegalStateException("Account %s already owns subscription %s, refusing to replace it with %s"
+                    .formatted(id, this.azureSubscriptionId, azureSubscriptionId));
+        }
+        this.azureSubscriptionId = azureSubscriptionId;
         touch(now);
     }
 
@@ -135,29 +131,19 @@ public class Account {
         this.errorDetail = "Step %s failed: %s".formatted(failedAt, cause);
     }
 
-    // --- retry / cleanup path ----------------------------------------------------------------
+    // --- retry -------------------------------------------------------------------------------
 
-    /** Claims a failed account as a retry, under a fresh lease. */
-    public void startCleanup(JobLease lease, Instant now) {
+    /**
+     * Claims a failed account as a retry, under a fresh lease. Whatever the failed run built is
+     * kept: the rerun's first step adopts it rather than creating a second subscription.
+     */
+    public void startRetry(JobLease lease, Instant now) {
         Objects.requireNonNull(lease, "lease must not be null");
-        transitionTo(ProvisioningStatus.CLEANING_UP, now);
+        transitionTo(ProvisioningStatus.PENDING, now);
         this.jobId = lease.jobId();
         this.ownerId = lease.ownerId();
         this.leaseExpiresAt = lease.expiresAt();
         this.errorDetail = null;
-    }
-
-    public void markCleanedUp(Instant now) {
-        requireStatus(ProvisioningStatus.CLEANING_UP);
-        this.azureSubscriptionId = null;
-        touch(now);
-    }
-
-    /** Distinct from {@link #failStep} so an operator can tell cleanup trouble from step trouble. */
-    public void failCleanup(String cause, Instant now) {
-        requireStatus(ProvisioningStatus.CLEANING_UP);
-        transitionTo(ProvisioningStatus.FAILED, now);
-        this.errorDetail = "CLEANUP_FAILED: " + cause;
     }
 
     // --- lease -------------------------------------------------------------------------------
@@ -188,16 +174,14 @@ public class Account {
     }
 
     /**
-     * The Azure subscription alias this account's current attempt owns.
+     * The Azure subscription alias this account owns, for the life of the account.
      *
-     * <p>Derived rather than stored, so there is no window in which we have called Azure but have
-     * not yet recorded what we asked it for. During cleanup — before the next
-     * {@link #startProvisioning} — this still names the failed attempt's subscription, which is how
-     * a subscription created by a run that died before recording its id is found and deleted
-     * instead of leaked.
+     * <p>Derived rather than stored, and deliberately stable: it is how a rerun finds the
+     * subscription an earlier run built and adopts it. That also covers the run that created a
+     * subscription and died before recording its id — the alias survives what the crash lost.
      */
     public String provisioningAlias() {
-        return "acct-%s-%d".formatted(id, attempt);
+        return "acct-" + id;
     }
 
     public boolean hasAzureSubscription() {

@@ -80,7 +80,7 @@ pl.jacekk.azureprovisioningservice
 │                        ManagementGroupPort, LabelValidationPort               (driven)
 ├── application
 │   └── service          AccountProvisioningService  — accept / conflict / retry decision
-│                        AsyncProvisioningWorkflow   — the run itself
+│                        AsyncProvisioningWorkflow   — the run itself (one path, not two)
 │                        StaleJobSweeper             — recovers jobs from dead replicas
 ├── adapter
 │   ├── in.web           AccountController, DTOs, RestExceptionHandler
@@ -93,73 +93,49 @@ pl.jacekk.azureprovisioningservice
 Two conventions worth knowing before you edit:
 
 - **`Account` has no setters.** State changes go through methods like `startProvisioning`,
-  `recordSubscriptionCreated`, `failStep` and `failCleanup`, each validated against
-  `ProvisioningStatus`'s transition table. An out-of-order workflow is rejected by the domain
-  rather than written to Mongo.
+  `recordSubscription`, `startRetry` and `failStep`, each validated against `ProvisioningStatus`'s
+  transition table. An out-of-order workflow is rejected by the domain rather than written to Mongo.
 - **The use case returns an `AcceptanceOutcome`, not a status code.** The controller maps
   `CREATED` and `RETRY_ACCEPTED` to 202, `ALREADY_IN_PROGRESS` to 409. HTTP stops at the adapter.
 
-## Retry and cleanup semantics
+## Retry semantics
 
 A failed job is retried by **posting the same subscription name again**. There is no separate retry
-endpoint, and no partial resume.
+endpoint — and no cleanup step, because nothing has to be undone first.
+
+Every step states a desired end state rather than an action:
 
 ```
-POST (name held by a FAILED job)
-  │
-  ▼
-0. CLEANING_UP ── recorded azureSubscriptionId? ── yes ──► delete it, then clear it
-  │                         │ no
-  │                         └─ look up the attempt's alias ── found ──► delete it
-  │                                                        └─ not found ──► nothing to do
-  │
-  ├── cleanup failed ──► FAILED, errorDetail "CLEANUP_FAILED: …", run stops here.
-  │                      Step 1 is not attempted until a later retry cleans up successfully.
-  ▼
-1. CREATING_SUBSCRIPTION      create, record the new id
-2. ASSIGNING_MANAGEMENT_GROUP move it under the target group
-3. APPLYING_LABELS            apply the four labels as tags
-  │
-  ├── any step failed ──► FAILED, errorDetail "Step <STATUS> failed: <cause>".
-  │                       The partially created subscription is LEFT IN PLACE on purpose —
-  │                       the next retry's step 0 deletes it.
-  ▼
-   COMPLETED
+1. CREATING_SUBSCRIPTION       ensureSubscription(alias, name)   → CREATED | ADOPTED
+2. ASSIGNING_MANAGEMENT_GROUP  ensurePlacedUnder(id, group)      → CREATED | UPDATED | ALREADY_SATISFIED
+3. APPLYING_LABELS             ensureTags(id, labels)            → CREATED | UPDATED | ALREADY_SATISFIED
 ```
 
-Two rules that are easy to get wrong and are covered by tests:
+So a retry is simply the run again. Each step asks Azure whether it is already satisfied and skips
+the work if so — which means the decision to skip comes from Azure, which knows, rather than from
+our record of where the previous run got to, which may be stale or was never written at all. A
+failing step records `Step <STATUS> failed: <cause>` and leaves everything it built in place, for
+the next run to adopt.
 
-- **Always a full rerun.** After a successful cleanup the run restarts at step 1. No step is
-  skipped because it happened to succeed last time.
-- **Cleanup is deferred, never immediate.** A failing step does not delete what it created. That
-  keeps the failure inspectable, and means the delete happens exactly once, at the start of the
-  next attempt.
+The claim that accepts a retry sends the account back to `PENDING`, so a retried job and a fresh one
+are indistinguishable from the workflow's point of view.
 
-`CLEANUP_FAILED:` and `Step …:` prefixes are deliberately distinct, so an operator can tell "Azure
-would not let go of the old subscription" from "the new one could not be built".
+### The alias, and why it never moves
 
-### Recovering a subscription nobody recorded
+Each account owns one Azure subscription alias, `acct-<account id>`, derived rather than stored and
+fixed for the life of the account. It is how step 1 finds an existing subscription and adopts it
+instead of creating a second.
 
-Cleanup cannot rely on `azureSubscriptionId` alone. A run can create a subscription and then die —
-OOM, eviction, or a lease that expired during a slow Azure call — before the id ever reaches Mongo.
-Trusting only the recorded id would mean the next retry saw nothing to clean up and created a
-*second* subscription, leaving the first orphaned with nothing pointing at it.
+That also covers the nastiest failure: a run creates the subscription and dies — evicted, or its
+lease expires mid-call — before the id reaches Mongo. Nothing in our records points at that
+subscription, but the alias does, so the next run adopts it. The alias survives what the crash lost.
 
-So every attempt creates its subscription under a derived alias:
+Adoption is also why `recordSubscription` refuses to overwrite an id it already holds with a
+different one: that would mean two subscriptions exist for one account, and it should fail loudly
+rather than silently forget the first.
 
-```
-acct-<account id>-<attempt>        e.g. acct-7d8a6eee-…-2
-```
-
-`attempt` is incremented and persisted **before** Azure is called, and the alias is derived rather
-than stored, so there is no window in which we have asked Azure for something we cannot name. During
-cleanup — before the next attempt starts — `provisioningAlias()` still names the failed run's
-subscription, so step 0 can ask Azure what that alias created and delete it even though the id was
-never written. A crashed attempt that never reached Azure simply resolves to nothing.
-
-Note that a lease heartbeat would *not* have solved this. It would stop the sweeper falsely
-abandoning a live job, but a genuine crash mid-create leaks in exactly the same way, which is why
-the fix is recovery rather than prevention.
+Re-running a `COMPLETED` account is safe and corrects drift — if someone retags or moves the
+subscription by hand, the steps put it back.
 
 ## Running on more than one replica
 
@@ -204,10 +180,9 @@ sweeper line together:
 
 | What | Where | Notes |
 |---|---|---|
-| Create / delete a subscription | `StubAzureSubscriptionAdapter` | Use `SubscriptionManager`. Creation means creating an **alias** (`Microsoft.Subscription/aliases/{aliasName}`) against a billing scope (EA enrollment account, MCA billing profile, or MPA agreement); deletion means cancelling. The billing-scope wiring is why this ships as a stub. Deletion must be idempotent — cleanup can run twice on the same subscription. |
-| Look up an alias | `StubAzureSubscriptionAdapter.findSubscriptionIdByAlias` | **Validate this against the live API before trusting it**: the recovery path above assumes looking an alias up returns its subscription, and that re-creating an existing alias is idempotent. The stub models both with an in-memory map, which proves the contract is used but not that Azure honours it. |
-| Apply tags | `StubAzureSubscriptionAdapter.applyTags` | Same manager, on the subscription resource. |
-| Move into a management group | `StubManagementGroupAdapter` | `ManagementGroupsManager.managementGroupSubscriptions().create(groupId, subscriptionId)`. |
+| Create or adopt a subscription | `StubAzureSubscriptionAdapter.ensureSubscription` | Use `SubscriptionManager`. A subscription is created by PUTting an **alias** (`Microsoft.Subscription/aliases/{aliasName}`) against a billing scope (EA enrollment account, MCA billing profile, or MPA agreement) — the billing-scope wiring is why this ships as a stub. GET the alias first and return `ADOPTED` if it already resolves. **Validate against the live API** that a GET returns the subscription and that PUTting an existing alias is idempotent: the adopt path depends on both. |
+| Apply tags | `StubAzureSubscriptionAdapter.ensureTags` | Read the current tags, compare, and only write when they differ. |
+| Move into a management group | `StubManagementGroupAdapter.ensurePlacedUnder` | Read the current parent; only call `managementGroupSubscriptions().create(groupId, subscriptionId)` when it differs. |
 | Credentials | `AzureCredentialConfig` | Already builds a `DefaultAzureCredential`; inject the `TokenCredential` into the adapters. |
 | A provider-specific label rule | new `LabelRule` bean in `adapter.out.validation` | E.g. "`cost-center-id` must match `CC-\d{4}` when the provider is `sap`". Publish the bean; `RuleBasedLabelValidator` picks it up and neither the use case nor the controller changes. |
 
@@ -227,7 +202,7 @@ Throw `AzureProvisioningException` from a port when Azure refuses — the workfl
 | `application.service` | fresh accept, 409, retry accept, the duplicate-key race; the full run, failure at each step, cleanup-then-rerun, cleanup failure stopping the run; sweeper behaviour |
 | `adapter.in.web` | 202 + `Location`, 400 on invalid labels, 409 on a duplicate, 202 on a retry, 404, response bodies |
 | `adapter.out.persistence` | unique index, CAS claim semantics, one winner among concurrent claims, optimistic locking, stale-job query |
-| `e2e` | HTTP → Mongo → async workflow, including the retry, failed-cleanup, and crashed-attempt-recovery branches |
+| `e2e` | HTTP → Mongo → async workflow, including a retry adopting the failed run's subscription — and one it never recorded |
 
 The last two rows need a container runtime for Testcontainers. **They skip themselves when none is
 available** (`@Testcontainers(disabledWithoutDocker = true)`) rather than failing the build — so a
