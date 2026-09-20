@@ -22,7 +22,7 @@ class SchedulingConfigurationTest {
             .withBean(AccountRepositoryPort.class, () -> mock(AccountRepositoryPort.class))
             .withBean(Clock.class, Clock::systemUTC)
             .withBean(ProvisioningProperties.class,
-                    () -> new ProvisioningProperties(null, null, 0, "replica-a"))
+                    () -> new ProvisioningProperties(null, 0, "replica-a"))
             .withBean(StaleJobSweeper.class);
 
     @Test

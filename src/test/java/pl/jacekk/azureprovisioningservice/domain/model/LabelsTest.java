@@ -35,7 +35,7 @@ class LabelsTest {
 
         source.put(Labels.COST_CENTER_ID, "tampered");
 
-        assertThat(labels.get(Labels.COST_CENTER_ID)).isEqualTo("CC-1001");
+        assertThat(labels.asMap().get(Labels.COST_CENTER_ID)).isEqualTo("CC-1001");
     }
 
     @Test

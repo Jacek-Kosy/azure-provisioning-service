@@ -28,11 +28,6 @@ public enum ProvisioningStatus {
         return !isTerminal();
     }
 
-    /** Only a failed job may be claimed as a retry. */
-    public boolean isRetryable() {
-        return this == FAILED;
-    }
-
     public boolean canTransitionTo(ProvisioningStatus target) {
         return allowedTargets().contains(target);
     }

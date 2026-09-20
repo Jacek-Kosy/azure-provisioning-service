@@ -22,13 +22,6 @@ class ProvisioningStatusTest {
         assertThat(CREATING_SUBSCRIPTION.isTerminal()).isFalse();
     }
 
-    @Test
-    void onlyFailedIsRetryable() {
-        assertThat(FAILED.isRetryable()).isTrue();
-        assertThat(COMPLETED.isRetryable()).isFalse();
-        assertThat(PENDING.isRetryable()).isFalse();
-    }
-
     @ParameterizedTest
     @EnumSource(ProvisioningStatus.class)
     void inFlightIsTheComplementOfTerminal(ProvisioningStatus status) {

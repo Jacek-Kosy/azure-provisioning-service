@@ -11,7 +11,6 @@ import pl.jacekk.azureprovisioningservice.domain.port.out.AccountRepositoryPort;
 import pl.jacekk.azureprovisioningservice.domain.port.out.AzureSubscriptionPort;
 import pl.jacekk.azureprovisioningservice.domain.port.out.ConcurrentAccountModificationException;
 import pl.jacekk.azureprovisioningservice.domain.port.out.ManagementGroupPort;
-import pl.jacekk.azureprovisioningservice.domain.port.out.ProvisionedSubscription;
 
 import java.time.Clock;
 import java.time.Instant;
@@ -30,8 +29,8 @@ public class AsyncProvisioningWorkflow implements ProvisioningWorkflow {
 
     private static final Logger log = LoggerFactory.getLogger(AsyncProvisioningWorkflow.class);
 
-    static final String MDC_JOB_ID = "jobId";
-    static final String MDC_ACCOUNT_ID = "accountId";
+    private static final String MDC_JOB_ID = "jobId";
+    private static final String MDC_ACCOUNT_ID = "accountId";
 
     private final AccountRepositoryPort accounts;
     private final AzureSubscriptionPort subscriptions;
@@ -75,22 +74,18 @@ public class AsyncProvisioningWorkflow implements ProvisioningWorkflow {
         try {
             account.startProvisioning(now());
             renewAndSave(account);
-            ProvisionedSubscription subscription = subscriptions.ensureSubscription(
+            String azureSubscriptionId = subscriptions.ensureSubscription(
                     account.provisioningAlias(), account.getSubscriptionName());
-            account.recordSubscription(subscription.azureSubscriptionId(), now());
+            account.recordSubscription(azureSubscriptionId, now());
             renewAndSave(account);
-            log.info("Subscription {}: {}", subscription.azureSubscriptionId(), subscription.outcome());
 
             account.startAssigningManagementGroup(now());
             renewAndSave(account);
-            log.info("Placement under {}: {}", account.getTargetManagementGroup(),
-                    managementGroups.ensurePlacedUnder(
-                            subscription.azureSubscriptionId(), account.getTargetManagementGroup()));
+            managementGroups.ensurePlacedUnder(azureSubscriptionId, account.getTargetManagementGroup());
 
             account.startApplyingLabels(now());
             renewAndSave(account);
-            log.info("Tags: {}", subscriptions.ensureTags(
-                    subscription.azureSubscriptionId(), account.getLabels()));
+            subscriptions.ensureTags(azureSubscriptionId, account.getLabels());
 
             account.complete(now());
             accounts.save(account);

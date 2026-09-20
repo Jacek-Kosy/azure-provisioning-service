@@ -39,10 +39,6 @@ public final class Labels {
         return values;
     }
 
-    public String get(String key) {
-        return values.get(key);
-    }
-
     @Override
     public boolean equals(Object other) {
         return other instanceof Labels labels && values.equals(labels.values);

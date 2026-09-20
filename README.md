@@ -24,7 +24,7 @@ API docs at `http://localhost:8080/swagger-ui.html`.
 | Variable | Purpose |
 |---|---|
 | `MONGODB_URI` | defaults to `mongodb://localhost:27017/azure-provisioning` |
-| `AZURE_TENANT_ID`, `AZURE_BILLING_SCOPE`, `AZURE_ROOT_MANAGEMENT_GROUP` | non-secret routing data |
+| `AZURE_BILLING_SCOPE`, `AZURE_ROOT_MANAGEMENT_GROUP` | non-secret routing data |
 | `AZURE_CLIENT_ID` / `AZURE_CLIENT_SECRET`, or a managed identity | credentials, read by `DefaultAzureCredential` |
 
 Credentials are never read from `application.yaml`, never bound into a configuration property, and
@@ -106,9 +106,9 @@ endpoint — and no cleanup step, because nothing has to be undone first.
 Every step states a desired end state rather than an action:
 
 ```
-1. CREATING_SUBSCRIPTION       ensureSubscription(alias, name)   → CREATED | ADOPTED
-2. ASSIGNING_MANAGEMENT_GROUP  ensurePlacedUnder(id, group)      → CREATED | UPDATED | ALREADY_SATISFIED
-3. APPLYING_LABELS             ensureTags(id, labels)            → CREATED | UPDATED | ALREADY_SATISFIED
+1. CREATING_SUBSCRIPTION       ensureSubscription(alias, name)   → the subscription id
+2. ASSIGNING_MANAGEMENT_GROUP  ensurePlacedUnder(id, group)
+3. APPLYING_LABELS             ensureTags(id, labels)
 ```
 
 So a retry is simply the run again. Each step asks Azure whether it is already satisfied and skips
@@ -161,13 +161,13 @@ over. Without it, a killed replica would park a subscription name in a non-termi
 every later request for that name would 409 forever.
 
 Tune with `provisioning.lease-duration`, `provisioning.sweep-interval`, `provisioning.sweep-batch-size`,
-and `provisioning.owner-id` (derived from `HOSTNAME` when unset).
+and `provisioning.owner-id` (a random id per process when unset).
 
 ## Correlation
 
 Every accepted request mints a `jobId`; a retry gets a fresh one. It is stored on the aggregate,
-returned by `GET`, and put in the MDC. `AsyncConfig`'s task decorator carries it across the hop
-onto the worker thread, so one `jobId` ties the POST line, every workflow line, and any later
+returned by `GET`, and logged on every line the run produces. The workflow puts it in the MDC for
+the duration of the run, so one `jobId` ties the POST line, every workflow line, and any later
 sweeper line together:
 
 ```
@@ -180,7 +180,7 @@ sweeper line together:
 
 | What | Where | Notes |
 |---|---|---|
-| Create or adopt a subscription | `StubAzureSubscriptionAdapter.ensureSubscription` | Use `SubscriptionManager`. A subscription is created by PUTting an **alias** (`Microsoft.Subscription/aliases/{aliasName}`) against a billing scope (EA enrollment account, MCA billing profile, or MPA agreement) — the billing-scope wiring is why this ships as a stub. GET the alias first and return `ADOPTED` if it already resolves. **Validate against the live API** that a GET returns the subscription and that PUTting an existing alias is idempotent: the adopt path depends on both. |
+| Create or adopt a subscription | `StubAzureSubscriptionAdapter.ensureSubscription` | Use `SubscriptionManager`. A subscription is created by PUTting an **alias** (`Microsoft.Subscription/aliases/{aliasName}`) against a billing scope (EA enrollment account, MCA billing profile, or MPA agreement) — the billing-scope wiring is why this ships as a stub. GET the alias first and return the existing id if it already resolves. **Validate against the live API** that a GET returns the subscription and that PUTting an existing alias is idempotent: the adopt path depends on both. |
 | Apply tags | `StubAzureSubscriptionAdapter.ensureTags` | Read the current tags, compare, and only write when they differ. |
 | Move into a management group | `StubManagementGroupAdapter.ensurePlacedUnder` | Read the current parent; only call `managementGroupSubscriptions().create(groupId, subscriptionId)` when it differs. |
 | Credentials | `AzureCredentialConfig` | Already builds a `DefaultAzureCredential`; inject the `TokenCredential` into the adapters. |

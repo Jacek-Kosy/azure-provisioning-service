@@ -49,7 +49,7 @@ class AccountProvisioningServiceTest {
     private final LabelValidationPort labelValidation = mock(LabelValidationPort.class);
     private final ProvisioningWorkflow workflow = mock(ProvisioningWorkflow.class);
     private final ProvisioningProperties properties =
-            new ProvisioningProperties(Duration.ofMinutes(5), Duration.ofMinutes(1), 100, "replica-a");
+            new ProvisioningProperties(Duration.ofMinutes(5), 100, "replica-a");
 
     private AccountProvisioningService service;
 
@@ -57,7 +57,7 @@ class AccountProvisioningServiceTest {
     void setUp() {
         service = new AccountProvisioningService(accounts, labelValidation, workflow,
                 Clock.fixed(NOW, ZoneOffset.UTC), properties);
-        when(labelValidation.validate(any())).thenReturn(LabelValidationResult.accepted());
+        when(labelValidation.validate(any())).thenReturn(LabelValidationResult.of(List.of()));
         when(accounts.insertNew(any())).thenAnswer(invocation -> invocation.getArgument(0));
     }
 

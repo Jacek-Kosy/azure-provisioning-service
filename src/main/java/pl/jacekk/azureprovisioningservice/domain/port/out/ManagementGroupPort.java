@@ -4,9 +4,10 @@ package pl.jacekk.azureprovisioningservice.domain.port.out;
 public interface ManagementGroupPort {
 
     /**
-     * Ensures the subscription sits directly under the given management group.
+     * Ensures the subscription sits directly under the given management group, moving it only if
+     * it is somewhere else.
      *
      * @throws AzureProvisioningException when the move is refused
      */
-    ReconcileOutcome ensurePlacedUnder(String azureSubscriptionId, String managementGroupId);
+    void ensurePlacedUnder(String azureSubscriptionId, String managementGroupId);
 }

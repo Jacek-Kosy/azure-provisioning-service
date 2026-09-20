@@ -20,8 +20,6 @@ import pl.jacekk.azureprovisioningservice.adapter.out.persistence.AccountDocumen
 import pl.jacekk.azureprovisioningservice.domain.model.ProvisioningStatus;
 import pl.jacekk.azureprovisioningservice.domain.port.out.AzureProvisioningException;
 import pl.jacekk.azureprovisioningservice.domain.port.out.AzureSubscriptionPort;
-import pl.jacekk.azureprovisioningservice.domain.port.out.ProvisionedSubscription;
-import pl.jacekk.azureprovisioningservice.domain.port.out.ReconcileOutcome;
 import pl.jacekk.azureprovisioningservice.domain.port.out.ManagementGroupPort;
 
 import java.time.Duration;
@@ -30,6 +28,7 @@ import java.time.Instant;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.reset;
@@ -85,10 +84,7 @@ class AccountProvisioningEndToEndIT {
     void resetState() {
         mongoTemplate.remove(new Query(), AccountDocument.class);
         reset(subscriptions, managementGroups);
-        when(subscriptions.ensureSubscription(any(), any()))
-                .thenReturn(new ProvisionedSubscription("sub-1", ReconcileOutcome.CREATED));
-        when(subscriptions.ensureTags(any(), any())).thenReturn(ReconcileOutcome.CREATED);
-        when(managementGroups.ensurePlacedUnder(any(), any())).thenReturn(ReconcileOutcome.CREATED);
+        when(subscriptions.ensureSubscription(any(), any())).thenReturn("sub-1");
     }
 
     private String postAccount(int expectedStatus) throws Exception {
@@ -172,10 +168,8 @@ class AccountProvisioningEndToEndIT {
         assertThat(failed.getAzureSubscriptionId()).isEqualTo("sub-1");
 
         // The alias never moves, so the rerun's first step finds what the failed run built.
-        doReturn(new ProvisionedSubscription("sub-1", ReconcileOutcome.ADOPTED))
-                .when(subscriptions).ensureSubscription("acct-" + accountId, "team-alpha-prod");
-        doReturn(ReconcileOutcome.ALREADY_SATISFIED)
-                .when(managementGroups).ensurePlacedUnder(any(), any());
+        doReturn("sub-1").when(subscriptions).ensureSubscription("acct-" + accountId, "team-alpha-prod");
+        doNothing().when(managementGroups).ensurePlacedUnder(any(), any());
 
         assertThat(idOf(postAccount(202))).isEqualTo(accountId);
         assertThat(awaitSettled(accountId)).isEqualTo(ProvisioningStatus.COMPLETED);
@@ -199,10 +193,8 @@ class AccountProvisioningEndToEndIT {
                 Query.query(Criteria.where("_id").is(accountId)),
                 new Update().unset("azureSubscriptionId"),
                 AccountDocument.class);
-        doReturn(new ProvisionedSubscription("sub-1", ReconcileOutcome.ADOPTED))
-                .when(subscriptions).ensureSubscription("acct-" + accountId, "team-alpha-prod");
-        doReturn(ReconcileOutcome.ALREADY_SATISFIED)
-                .when(managementGroups).ensurePlacedUnder(any(), any());
+        doReturn("sub-1").when(subscriptions).ensureSubscription("acct-" + accountId, "team-alpha-prod");
+        doNothing().when(managementGroups).ensurePlacedUnder(any(), any());
 
         postAccount(202);
 

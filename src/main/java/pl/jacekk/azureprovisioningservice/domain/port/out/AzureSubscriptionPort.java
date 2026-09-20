@@ -16,10 +16,11 @@ public interface AzureSubscriptionPort {
      * Ensures a subscription exists under {@code alias}, adopting the one an earlier run created
      * rather than making a second.
      *
+     * @return the Azure subscription id
      * @throws AzureProvisioningException when Azure refuses
      */
-    ProvisionedSubscription ensureSubscription(String alias, String subscriptionName);
+    String ensureSubscription(String alias, String subscriptionName);
 
     /** Ensures the subscription carries exactly these tags, correcting any drift. */
-    ReconcileOutcome ensureTags(String azureSubscriptionId, Labels labels);
+    void ensureTags(String azureSubscriptionId, Labels labels);
 }

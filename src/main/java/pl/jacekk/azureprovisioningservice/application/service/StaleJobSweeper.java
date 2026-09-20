@@ -2,7 +2,6 @@ package pl.jacekk.azureprovisioningservice.application.service;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.slf4j.MDC;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 import pl.jacekk.azureprovisioningservice.config.ProvisioningProperties;
@@ -46,21 +45,16 @@ public class StaleJobSweeper {
     }
 
     private void recover(Account account, Instant now) {
-        MDC.put(AsyncProvisioningWorkflow.MDC_JOB_ID, account.getJobId());
-        MDC.put(AsyncProvisioningWorkflow.MDC_ACCOUNT_ID, account.getId());
+        String abandonedBy = account.getOwnerId();
         try {
-            String abandonedBy = account.getOwnerId();
             account.abandon(now);
             accounts.save(account);
-            log.warn("Recovered job for subscription '{}' abandoned by {}; it is now retryable",
-                    account.getSubscriptionName(), abandonedBy);
+            log.warn("Recovered job {} for subscription '{}' abandoned by {}; it is now retryable",
+                    account.getJobId(), account.getSubscriptionName(), abandonedBy);
         } catch (ConcurrentAccountModificationException e) {
             log.debug("Account {} was recovered by another replica first", account.getId());
         } catch (RuntimeException e) {
             log.error("Could not recover abandoned account {}", account.getId(), e);
-        } finally {
-            MDC.remove(AsyncProvisioningWorkflow.MDC_JOB_ID);
-            MDC.remove(AsyncProvisioningWorkflow.MDC_ACCOUNT_ID);
         }
     }
 }

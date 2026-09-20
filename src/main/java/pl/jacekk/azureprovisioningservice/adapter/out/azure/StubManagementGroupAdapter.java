@@ -5,7 +5,6 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 import pl.jacekk.azureprovisioningservice.config.AzureProperties;
 import pl.jacekk.azureprovisioningservice.domain.port.out.ManagementGroupPort;
-import pl.jacekk.azureprovisioningservice.domain.port.out.ReconcileOutcome;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -32,15 +31,12 @@ public class StubManagementGroupAdapter implements ManagementGroupPort {
     }
 
     @Override
-    public ReconcileOutcome ensurePlacedUnder(String azureSubscriptionId, String managementGroupId) {
+    public void ensurePlacedUnder(String azureSubscriptionId, String managementGroupId) {
         String target = managementGroupId == null || managementGroupId.isBlank()
                 ? properties.rootManagementGroup()
                 : managementGroupId;
-        String current = parentBySubscription.put(azureSubscriptionId, target);
-        if (target.equals(current)) {
-            return ReconcileOutcome.ALREADY_SATISFIED;
+        if (!target.equals(parentBySubscription.put(azureSubscriptionId, target))) {
+            log.warn("STUB: not moving subscription {} into management group {}", azureSubscriptionId, target);
         }
-        log.warn("STUB: not moving subscription {} into management group {}", azureSubscriptionId, target);
-        return current == null ? ReconcileOutcome.CREATED : ReconcileOutcome.UPDATED;
     }
 }

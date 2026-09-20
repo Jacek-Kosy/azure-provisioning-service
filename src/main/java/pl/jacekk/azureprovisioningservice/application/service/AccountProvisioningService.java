@@ -2,7 +2,6 @@ package pl.jacekk.azureprovisioningservice.application.service;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.slf4j.MDC;
 import org.springframework.stereotype.Service;
 import pl.jacekk.azureprovisioningservice.config.ProvisioningProperties;
 import pl.jacekk.azureprovisioningservice.domain.model.Account;
@@ -73,8 +72,7 @@ public class AccountProvisioningService implements CreateAccountUseCase, GetAcco
                 now);
         try {
             Account inserted = accounts.insertNew(account);
-            withJobContext(inserted, () -> log.info("Accepted a new provisioning job for subscription '{}'",
-                    inserted.getSubscriptionName()));
+            log.info("Accepted job {} for subscription '{}'", inserted.getJobId(), inserted.getSubscriptionName());
             workflow.run(inserted.getId());
             return new AccountAcceptance(inserted.getId(), AcceptanceOutcome.CREATED);
         } catch (DuplicateSubscriptionNameException e) {
@@ -91,9 +89,8 @@ public class AccountProvisioningService implements CreateAccountUseCase, GetAcco
         Optional<Account> claimed = accounts.claimForRetry(subscriptionName, newLease(now), now);
         if (claimed.isPresent()) {
             Account account = claimed.get();
-            withJobContext(account, () -> log.info(
-                    "Accepted a retry for subscription '{}'; every step will reconcile",
-                    account.getSubscriptionName()));
+            log.info("Accepted retry job {} for subscription '{}'; every step will reconcile",
+                    account.getJobId(), account.getSubscriptionName());
             workflow.run(account.getId());
             return new AccountAcceptance(account.getId(), AcceptanceOutcome.RETRY_ACCEPTED);
         }
@@ -117,16 +114,5 @@ public class AccountProvisioningService implements CreateAccountUseCase, GetAcco
                 UUID.randomUUID().toString(),
                 properties.ownerId(),
                 now.plus(properties.leaseDuration()));
-    }
-
-    private void withJobContext(Account account, Runnable logging) {
-        MDC.put(AsyncProvisioningWorkflow.MDC_JOB_ID, account.getJobId());
-        MDC.put(AsyncProvisioningWorkflow.MDC_ACCOUNT_ID, account.getId());
-        try {
-            logging.run();
-        } finally {
-            MDC.remove(AsyncProvisioningWorkflow.MDC_JOB_ID);
-            MDC.remove(AsyncProvisioningWorkflow.MDC_ACCOUNT_ID);
-        }
     }
 }

@@ -14,8 +14,6 @@ import pl.jacekk.azureprovisioningservice.domain.port.out.AzureProvisioningExcep
 import pl.jacekk.azureprovisioningservice.domain.port.out.AzureSubscriptionPort;
 import pl.jacekk.azureprovisioningservice.domain.port.out.ConcurrentAccountModificationException;
 import pl.jacekk.azureprovisioningservice.domain.port.out.ManagementGroupPort;
-import pl.jacekk.azureprovisioningservice.domain.port.out.ProvisionedSubscription;
-import pl.jacekk.azureprovisioningservice.domain.port.out.ReconcileOutcome;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -28,6 +26,8 @@ import java.util.concurrent.atomic.AtomicReference;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
@@ -48,7 +48,7 @@ class ProvisioningWorkflowTest {
     private final AzureSubscriptionPort subscriptions = mock(AzureSubscriptionPort.class);
     private final ManagementGroupPort managementGroups = mock(ManagementGroupPort.class);
     private final ProvisioningProperties properties =
-            new ProvisioningProperties(Duration.ofMinutes(5), Duration.ofMinutes(1), 100, "replica-a");
+            new ProvisioningProperties(Duration.ofMinutes(5), 100, "replica-a");
 
     private AsyncProvisioningWorkflow workflow;
 
@@ -57,10 +57,7 @@ class ProvisioningWorkflowTest {
         workflow = new AsyncProvisioningWorkflow(accounts, subscriptions, managementGroups,
                 Clock.fixed(NOW, ZoneOffset.UTC), properties);
         when(accounts.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
-        when(subscriptions.ensureSubscription(any(), any()))
-                .thenReturn(new ProvisionedSubscription("sub-1", ReconcileOutcome.CREATED));
-        when(subscriptions.ensureTags(any(), any())).thenReturn(ReconcileOutcome.CREATED);
-        when(managementGroups.ensurePlacedUnder(any(), any())).thenReturn(ReconcileOutcome.CREATED);
+        when(subscriptions.ensureSubscription(any(), any())).thenReturn("sub-1");
     }
 
     private Account pending() {
@@ -106,16 +103,12 @@ class ProvisioningWorkflowTest {
         AtomicReference<ProvisioningStatus> duringTagging = new AtomicReference<>();
         when(subscriptions.ensureSubscription(any(), any())).thenAnswer(invocation -> {
             duringCreate.set(account.getStatus());
-            return new ProvisionedSubscription("sub-1", ReconcileOutcome.CREATED);
+            return "sub-1";
         });
-        when(managementGroups.ensurePlacedUnder(any(), any())).thenAnswer(invocation -> {
-            duringPlacement.set(account.getStatus());
-            return ReconcileOutcome.CREATED;
-        });
-        when(subscriptions.ensureTags(any(), any())).thenAnswer(invocation -> {
-            duringTagging.set(account.getStatus());
-            return ReconcileOutcome.CREATED;
-        });
+        doAnswer(invocation -> duringPlacement.getAndSet(account.getStatus()))
+                .when(managementGroups).ensurePlacedUnder(any(), any());
+        doAnswer(invocation -> duringTagging.getAndSet(account.getStatus()))
+                .when(subscriptions).ensureTags(any(), any());
 
         workflow.run("acc-1");
 
@@ -127,8 +120,7 @@ class ProvisioningWorkflowTest {
     @Test
     void aRerunAdoptsTheSubscriptionTheFailedRunBuilt() {
         Account account = retriedAfterFailure("sub-1");
-        when(subscriptions.ensureSubscription(ALIAS, "team-alpha-prod"))
-                .thenReturn(new ProvisionedSubscription("sub-1", ReconcileOutcome.ADOPTED));
+        when(subscriptions.ensureSubscription(ALIAS, "team-alpha-prod")).thenReturn("sub-1");
 
         workflow.run("acc-1");
 
@@ -142,8 +134,7 @@ class ProvisioningWorkflowTest {
     void aRerunAdoptsASubscriptionTheFailedRunNeverManagedToRecord() {
         // The run that created it died before the id reached Mongo. The alias outlives that.
         Account account = retriedAfterFailure(null);
-        when(subscriptions.ensureSubscription(ALIAS, "team-alpha-prod"))
-                .thenReturn(new ProvisionedSubscription("sub-untracked", ReconcileOutcome.ADOPTED));
+        when(subscriptions.ensureSubscription(ALIAS, "team-alpha-prod")).thenReturn("sub-untracked");
 
         workflow.run("acc-1");
 
@@ -154,10 +145,7 @@ class ProvisioningWorkflowTest {
     @Test
     void aRerunOverAlreadyCorrectStateChangesNothing() {
         Account account = retriedAfterFailure("sub-1");
-        when(subscriptions.ensureSubscription(any(), any()))
-                .thenReturn(new ProvisionedSubscription("sub-1", ReconcileOutcome.ADOPTED));
-        when(managementGroups.ensurePlacedUnder(any(), any())).thenReturn(ReconcileOutcome.ALREADY_SATISFIED);
-        when(subscriptions.ensureTags(any(), any())).thenReturn(ReconcileOutcome.ALREADY_SATISFIED);
+        when(subscriptions.ensureSubscription(any(), any())).thenReturn("sub-1");
 
         workflow.run("acc-1");
 
@@ -181,8 +169,8 @@ class ProvisioningWorkflowTest {
     @Test
     void failedPlacementNamesTheStepAndKeepsTheSubscription() {
         Account account = pending();
-        when(managementGroups.ensurePlacedUnder(any(), any()))
-                .thenThrow(new AzureProvisioningException("management group not found"));
+        doThrow(new AzureProvisioningException("management group not found"))
+                .when(managementGroups).ensurePlacedUnder(any(), any());
 
         workflow.run("acc-1");
 
@@ -197,8 +185,8 @@ class ProvisioningWorkflowTest {
     @Test
     void failedTaggingNamesTheStep() {
         Account account = pending();
-        when(subscriptions.ensureTags(any(), any()))
-                .thenThrow(new AzureProvisioningException("tag quota exceeded"));
+        doThrow(new AzureProvisioningException("tag quota exceeded"))
+                .when(subscriptions).ensureTags(any(), any());
 
         workflow.run("acc-1");
 
@@ -245,7 +233,7 @@ class ProvisioningWorkflowTest {
         AtomicReference<String> jobIdDuringRun = new AtomicReference<>();
         when(subscriptions.ensureSubscription(any(), any())).thenAnswer(invocation -> {
             jobIdDuringRun.set(MDC.get("jobId"));
-            return new ProvisionedSubscription("sub-1", ReconcileOutcome.CREATED);
+            return "sub-1";
         });
 
         workflow.run("acc-1");

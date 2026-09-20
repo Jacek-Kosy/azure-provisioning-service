@@ -9,10 +9,9 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * {@link AzureCredentialConfig} from environment variables or a managed identity, so no secret is
  * ever bound into configuration, written to a config file, or available to be logged.
  *
- * @param tenantId Entra tenant the subscriptions belong to
  * @param billingScope billing scope / enrollment account new subscriptions are charged to
  * @param rootManagementGroup management group used when a request does not name one
  */
 @ConfigurationProperties(prefix = "azure")
-public record AzureProperties(String tenantId, String billingScope, String rootManagementGroup) {
+public record AzureProperties(String billingScope, String rootManagementGroup) {
 }

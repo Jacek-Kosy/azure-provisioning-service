@@ -6,8 +6,6 @@ import org.springframework.stereotype.Component;
 import pl.jacekk.azureprovisioningservice.config.AzureProperties;
 import pl.jacekk.azureprovisioningservice.domain.model.Labels;
 import pl.jacekk.azureprovisioningservice.domain.port.out.AzureSubscriptionPort;
-import pl.jacekk.azureprovisioningservice.domain.port.out.ProvisionedSubscription;
-import pl.jacekk.azureprovisioningservice.domain.port.out.ReconcileOutcome;
 
 import java.util.Map;
 import java.util.UUID;
@@ -40,27 +38,24 @@ public class StubAzureSubscriptionAdapter implements AzureSubscriptionPort {
     }
 
     @Override
-    public ProvisionedSubscription ensureSubscription(String alias, String subscriptionName) {
+    public String ensureSubscription(String alias, String subscriptionName) {
         String existing = subscriptionIdsByAlias.get(alias);
         if (existing != null) {
             log.warn("STUB: adopting subscription {} already created under alias {}", existing, alias);
-            return new ProvisionedSubscription(existing, ReconcileOutcome.ADOPTED);
+            return existing;
         }
         String created = UUID.randomUUID().toString();
         subscriptionIdsByAlias.put(alias, created);
         log.warn("STUB: not creating subscription '{}' in Azure; alias {} stands for {} "
                 + "(billing scope would be '{}')", subscriptionName, alias, created, properties.billingScope());
-        return new ProvisionedSubscription(created, ReconcileOutcome.CREATED);
+        return created;
     }
 
     @Override
-    public ReconcileOutcome ensureTags(String azureSubscriptionId, Labels labels) {
-        Map<String, String> current = tagsBySubscription.get(azureSubscriptionId);
-        if (labels.asMap().equals(current)) {
-            return ReconcileOutcome.ALREADY_SATISFIED;
+    public void ensureTags(String azureSubscriptionId, Labels labels) {
+        if (labels.asMap().equals(tagsBySubscription.put(azureSubscriptionId, labels.asMap()))) {
+            return;
         }
-        tagsBySubscription.put(azureSubscriptionId, labels.asMap());
         log.warn("STUB: not tagging subscription {} with {} keys", azureSubscriptionId, labels.asMap().size());
-        return current == null ? ReconcileOutcome.CREATED : ReconcileOutcome.UPDATED;
     }
 }

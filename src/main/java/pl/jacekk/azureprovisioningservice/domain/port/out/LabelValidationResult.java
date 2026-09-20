@@ -9,10 +9,6 @@ public record LabelValidationResult(List<String> violations) {
         violations = List.copyOf(violations);
     }
 
-    public static LabelValidationResult accepted() {
-        return new LabelValidationResult(List.of());
-    }
-
     public static LabelValidationResult of(List<String> violations) {
         return new LabelValidationResult(violations);
     }

@@ -174,7 +174,7 @@ validated when the real adapter is written.
 
 **Correlation.** Every accepted request mints a `jobId` (a retry gets a fresh one). It is stored
 on the aggregate, returned by `GET`, and placed in the MDC for both the request thread and the
-async worker — `MdcTaskDecorator` copies the context across the thread hop, so a single `jobId`
+async worker, which puts it in the MDC for the duration of the run — so a single `jobId`
 ties the POST log line to every workflow line and to the sweeper line that later abandons it.
 
 **Credentials.** `DefaultAzureCredential` resolves from environment variables or managed

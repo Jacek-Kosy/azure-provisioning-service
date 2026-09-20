@@ -35,7 +35,7 @@ class StaleJobSweeperTest {
 
     private final AccountRepositoryPort accounts = mock(AccountRepositoryPort.class);
     private final ProvisioningProperties properties =
-            new ProvisioningProperties(Duration.ofMinutes(5), Duration.ofMinutes(1), 50, "replica-b");
+            new ProvisioningProperties(Duration.ofMinutes(5), 50, "replica-b");
     private final StaleJobSweeper sweeper =
             new StaleJobSweeper(accounts, Clock.fixed(NOW, ZoneOffset.UTC), properties);
 
